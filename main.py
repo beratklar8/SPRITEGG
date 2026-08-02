@@ -224,20 +224,20 @@ class ModerationBot(commands.Bot):
                         reply_text = response.text[:1900]
                         await message.reply(reply_text)
                     except Exception as e:
-    import traceback
+                        import traceback
 
-    traceback.print_exc()
+                        traceback.print_exc()
 
-    print("=" * 60)
-    print("FULL GEMINI ERROR")
-    print(type(e).__name__)
-    print(str(e))
-    print("=" * 60)
+                        print("=" * 60)
+                        print("FULL GEMINI ERROR")
+                        print(type(e).__name__)
+                        print(str(e))
+                        print("=" * 60)
 
-    await message.reply(
-        f"❌ Gemini Error\n"
-        f"Type: `{type(e).__name__}`\n"
-        f"Message:\n```{e}```"
+                        await message.reply(
+                            f"❌ Gemini Error\n"
+                            f"Type: `{type(e).__name__}`\n"
+                            f"Message:\n```{e}```"
                         )
 
         # 2. AutoMod Checks
