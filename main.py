@@ -43,7 +43,6 @@ if GEMINI_API_SECRET:
 # In-memory stores for active features
 sticky_messages = {}
 afk_users = {}
-user_eco_cache = {}
 user_cooldowns = {}
 
 # =====================================================================
@@ -148,15 +147,6 @@ class DatabaseController:
                     author_id INTEGER,
                     comment TEXT,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS economy_balances (
-                    guild_id INTEGER,
-                    user_id INTEGER,
-                    wallet INTEGER DEFAULT 0,
-                    bank INTEGER DEFAULT 0,
-                    PRIMARY KEY (guild_id, user_id)
                 )
             """)
             await conn.execute("""
@@ -355,7 +345,7 @@ class ExtendedBotClient(commands.Bot):
             clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
             
             if not clean_text:
-                return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your questions today?")
+                return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your queries today?")
 
             async with message.channel.typing():
                 if gemini_api_client:
@@ -691,76 +681,6 @@ async def view_notes(interaction: discord.Interaction, user: discord.Member):
     for n_id, a_id, content, ts in notes:
         packet.add_field(name=f"Note #{n_id} (Author: <@{a_id}>)", value=f"{content}\n*Timestamp: {ts}*", inline=False)
     await interaction.response.send_message(embed=packet, ephemeral=True)
-
-# =====================================================================
-# ECONOMY SUITE
-# =====================================================================
-economy_hub = app_commands.Group(name="economy", description="Community financial ecosystem commands")
-
-@economy_hub.command(name="balance", description="Check your current wallet and bank balance")
-async def eco_balance(interaction: discord.Interaction, user: Optional[discord.Member] = None):
-    target = user or interaction.user
-    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, target.id))
-    wallet = res[0] if res else 0
-    bank = res[1] if res else 0
-
-    packet = make_embed(f"Financial Balance — {target.name}", f"Overview of financial assets.")
-    packet.add_field(name="Wallet", value=f"🪙 {wallet:,} credits", inline=True)
-    packet.add_field(name="Bank", value=f"🏦 {bank:,} credits", inline=True)
-    await interaction.response.send_message(embed=packet)
-
-@economy_hub.command(name="deposit", description="Deposit cash from wallet into bank account")
-async def eco_deposit(interaction: discord.Interaction, amount: int):
-    if amount <= 0:
-        return await interaction.response.send_message(embed=error_embed("Error", "Amount must be greater than zero."), ephemeral=True)
-    
-    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, interaction.user.id))
-    wallet = res[0] if res else 0
-    bank = res[1] if res else 0
-
-    if wallet < amount:
-        return await interaction.response.send_message(embed=error_embed("Error", "You do not have enough funds in your wallet."), ephemeral=True)
-
-    await db_controller.execute(
-        "INSERT OR REPLACE INTO economy_balances (guild_id, user_id, wallet, bank) VALUES (?, ?, ?, ?)",
-        (interaction.guild_id, interaction.user.id, wallet - amount, bank + amount)
-    )
-    await interaction.response.send_message(embed=success_embed("Deposit Successful", f"Deposited **{amount:,}** credits into your bank account."))
-
-@economy_hub.command(name="withdraw", description="Withdraw currency from bank account to wallet")
-async def eco_withdraw(interaction: discord.Interaction, amount: int):
-    if amount <= 0:
-        return await interaction.response.send_message(embed=error_embed("Error", "Amount must be greater than zero."), ephemeral=True)
-    
-    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, interaction.user.id))
-    wallet = res[0] if res else 0
-    bank = res[1] if res else 0
-
-    if bank < amount:
-        return await interaction.response.send_message(embed=error_embed("Error", "You do not have enough funds in your bank account."), ephemeral=True)
-
-    await db_controller.execute(
-        "INSERT OR REPLACE INTO economy_balances (guild_id, user_id, wallet, bank) VALUES (?, ?, ?, ?)",
-        (interaction.guild_id, interaction.user.id, wallet + amount, bank - amount)
-    )
-    await interaction.response.send_message(embed=success_embed("Withdrawal Successful", f"Withdrew **{amount:,}** credits into your wallet."))
-
-@economy_hub.command(name="work", description="Perform professional labor to earn currency")
-async def eco_work(interaction: discord.Interaction):
-    earnings = random.randint(100, 350)
-    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, interaction.user.id))
-    wallet = res[0] if res else 0
-    bank = res[1] if res else 0
-
-    await db_controller.execute(
-        "INSERT OR REPLACE INTO economy_balances (guild_id, user_id, wallet, bank) VALUES (?, ?, ?, ?)",
-        (interaction.guild_id, interaction.user.id, wallet + earnings, bank)
-    )
-    jobs = ["software developer", "community moderator", "graphic designer", "server administrator", "content creator"]
-    job_title = random.choice(jobs)
-    await interaction.response.send_message(embed=success_embed("Shift Completed", f"You worked as a **{job_title}** and earned **{earnings:,}** credits!"))
-
-bot_client.tree.add_command(economy_hub)
 
 # =====================================================================
 # REPUTATION / VOUCH SYSTEM
