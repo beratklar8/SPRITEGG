@@ -209,13 +209,15 @@ class ModerationBot(commands.Bot):
             async with message.channel.typing():
                 if ai_client:
                     try:
-                        response = ai_client.models.generate_content(
+                        response = await asyncio.to_thread(
+                            ai_client.models.generate_content,
                             model='gemini-2.5-flash',
                             contents=clean_content
                         )
                         reply_text = response.text[:1900]
                         await message.reply(reply_text)
                     except Exception as e:
+                        print(f"AI Error: {e}")
                         await message.reply("Sorry, I had trouble processing that request.")
                 else:
                     await message.reply("AI is currently not configured. Please set the `GEMINI_API_KEY` environment variable.")
