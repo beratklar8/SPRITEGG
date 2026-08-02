@@ -355,7 +355,7 @@ class ExtendedBotClient(commands.Bot):
             clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
             
             if not clean_text:
-                return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your queries today?")
+                return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your questions today?")
 
             async with message.channel.typing():
                 if gemini_api_client:
