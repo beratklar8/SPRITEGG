@@ -1,62 +1,56 @@
 import os
+import re
+import time
 import random
-import datetime
 import asyncio
-import aiosqlite
+import datetime
+from typing import Optional
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+import aiosqlite
 from aiohttp import web
+from dotenv import load_dotenv
 
-# --- CONFIGURATION ---
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
-DATABASE_PATH = "bot_database.db"
+load_dotenv()
+
+# ==========================================
+# CONFIGURATIE
+# ==========================================
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_data.db")
 PORT = int(os.getenv("PORT", 8080))
 
-PRIMARY_COLOR = 0x5865F2
-SUCCESS_COLOR = 0x57F287
-WARNING_COLOR = 0xFEE75C
-DANGER_COLOR = 0xED4245
+COLOR_PRIMARY = 0x5865F2    # Blurple
+COLOR_SUCCESS = 0x57F287    # Groen
+COLOR_WARNING = 0xFEE75C    # Geel
+COLOR_ERROR = 0xED4245      # Rood
 
-# --- KEEP-ALIVE WEB SERVER FOR RENDER ---
-async def handle_ping(request):
-    return web.Response(text="Bot is online and active!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"Keep-alive web server started on port {PORT}")
-
-def create_embed(title=None, description=None, color=PRIMARY_COLOR):
+# ==========================================
+# EMBED HELPERS
+# ==========================================
+def create_embed(title: str, description: str, color: int = COLOR_PRIMARY) -> discord.Embed:
     return discord.Embed(title=title, description=description, color=color)
 
-def success_embed(desc, title="Success"):
-    return create_embed(title=f"✅ {title}", description=desc, color=SUCCESS_COLOR)
+def success_embed(title: str, description: str) -> discord.Embed:
+    return create_embed(f"✅ {title}", description, COLOR_SUCCESS)
 
-def error_embed(desc, title="Error"):
-    return create_embed(title=f"❌ {title}", description=desc, color=DANGER_COLOR)
+def error_embed(title: str, description: str) -> discord.Embed:
+    return create_embed(f"❌ {title}", description, COLOR_ERROR)
 
-def warning_embed(desc, title="Warning"):
-    return create_embed(title=f"⚠️ {title}", description=desc, color=WARNING_COLOR)
+def warning_embed(title: str, description: str) -> discord.Embed:
+    return create_embed(f"⚠️ {title}", description, COLOR_WARNING)
 
-# --- DATABASE ENGINE ---
+# ==========================================
+# DATABASE BEHEER
+# ==========================================
 class Database:
-    def __init__(self, db_path=DATABASE_PATH):
+    def __init__(self, db_path: str = DATABASE_PATH):
         self.db_path = db_path
 
-    async def connect(self):
+    async def init(self):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA foreign_keys = ON;")
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS guild_settings (
-                    guild_id INTEGER PRIMARY KEY,
-                    ticket_category INTEGER
-                )
-            """)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS warnings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,11 +62,16 @@ class Database:
                 )
             """)
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS tempbans (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                CREATE TABLE IF NOT EXISTS ticket_configs (
+                    guild_id INTEGER PRIMARY KEY,
+                    category_id INTEGER
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS active_tickets (
+                    channel_id INTEGER PRIMARY KEY,
                     guild_id INTEGER,
-                    user_id INTEGER,
-                    unban_time TIMESTAMP
+                    user_id INTEGER
                 )
             """)
             await db.execute("""
@@ -81,24 +80,15 @@ class Database:
                     channel_id INTEGER,
                     guild_id INTEGER,
                     prize TEXT,
-                    end_time TIMESTAMP,
-                    winner_count INTEGER,
-                    ended INTEGER DEFAULT 0
+                    end_time REAL,
+                    winners INTEGER,
+                    ended BOOLEAN DEFAULT 0
                 )
             """)
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS giveaway_participants (
-                    message_id INTEGER,
-                    user_id INTEGER,
-                    PRIMARY KEY (message_id, user_id)
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS tickets (
-                    channel_id INTEGER PRIMARY KEY,
-                    guild_id INTEGER,
-                    user_id INTEGER,
-                    status TEXT DEFAULT 'open'
+                CREATE TABLE IF NOT EXISTS guild_settings (
+                    guild_id INTEGER PRIMARY KEY,
+                    automod_enabled BOOLEAN DEFAULT 0
                 )
             """)
             await db.commit()
@@ -121,209 +111,234 @@ class Database:
 
 db = Database()
 
-# --- PERSISTENT BUTTON VIEWS ---
-class TicketLaunchView(discord.ui.View):
+# ==========================================
+# PERSISTENT VIEWS (TICKETS)
+# ==========================================
+class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Open Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_ticket_create", emoji="🎫")
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+    @discord.ui.button(label="📩 Open Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_open_ticket")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
-        settings = await db.fetchone("SELECT ticket_category FROM guild_settings WHERE guild_id = ?", (guild.id,))
-        
-        category = guild.get_channel(settings[0]) if settings and settings[0] else None
-        existing = await db.fetchone("SELECT channel_id FROM tickets WHERE guild_id = ? AND user_id = ? AND status = 'open'", (guild.id, interaction.user.id))
-        
-        if existing and guild.get_channel(existing[0]):
-            return await interaction.followup.send("You already have an open ticket!", ephemeral=True)
+        row = await db.fetchone("SELECT category_id FROM ticket_configs WHERE guild_id = ?", (guild.id,))
+        category_id = row[0] if row else None
+        category = guild.get_channel(category_id) if category_id else None
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True)
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
 
-        ticket_channel = await guild.create_text_channel(
+        channel = await guild.create_text_channel(
             name=f"ticket-{interaction.user.name}",
             category=category,
             overwrites=overwrites
         )
 
-        await db.execute("INSERT INTO tickets (channel_id, guild_id, user_id) VALUES (?, ?, ?)", (ticket_channel.id, guild.id, interaction.user.id))
-        await ticket_channel.send(content=interaction.user.mention, embed=success_embed("Welcome! A moderator will assist you shortly.", title="Ticket Created"), view=TicketControlView())
-        await interaction.followup.send(f"Ticket created: {ticket_channel.mention}", ephemeral=True)
+        await db.execute("INSERT INTO active_tickets (channel_id, guild_id, user_id) VALUES (?, ?, ?)",
+                         (channel.id, guild.id, interaction.user.id))
 
-class TicketControlView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+        close_view = discord.ui.View(timeout=None)
+        close_btn = discord.ui.Button(label="🔒 Sluit Ticket", style=discord.ButtonStyle.danger, custom_id="persistent_close_ticket")
+        close_view.add_item(close_btn)
 
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="persistent_ticket_close", emoji="🔒")
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Closing ticket in 5 seconds...")
-        await db.execute("UPDATE tickets SET status = 'closed' WHERE channel_id = ?", (interaction.channel.id,))
-        await asyncio.sleep(5)
-        await interaction.channel.delete()
+        await channel.send(embed=create_embed("Ticket Geopend", f"Welkom {interaction.user.mention}! Beschrijf je vraag of probleem."), view=close_view)
+        await interaction.response.send_message(content=f"Ticket aangemaakt in {channel.mention}!", ephemeral=True)
 
-class GiveawayJoinView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Enter Giveaway", style=discord.ButtonStyle.success, custom_id="persistent_giveaway_join", emoji="🎉")
-    async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
-        msg_id = interaction.message.id
-        giveaway = await db.fetchone("SELECT ended FROM giveaways WHERE message_id = ?", (msg_id,))
-        
-        if not giveaway or giveaway[0] == 1:
-            return await interaction.response.send_message("This giveaway has ended.", ephemeral=True)
-
-        existing = await db.fetchone("SELECT user_id FROM giveaway_participants WHERE message_id = ? AND user_id = ?", (msg_id, interaction.user.id))
-        if existing:
-            await db.execute("DELETE FROM giveaway_participants WHERE message_id = ? AND user_id = ?", (msg_id, interaction.user.id))
-            await interaction.response.send_message("You left the giveaway.", ephemeral=True)
-        else:
-            await db.execute("INSERT INTO giveaway_participants (message_id, user_id) VALUES (?, ?)", (msg_id, interaction.user.id))
-            await interaction.response.send_message("You entered the giveaway!", ephemeral=True)
-
-# --- BOT MAIN CLASS ---
+# ==========================================
+# MAIN BOT CLASS
+# ==========================================
 class ModerationBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        super().__init__(command_prefix="!", intents=intents)
+        self.invite_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
 
     async def setup_hook(self):
-        await db.connect()
-        await start_web_server()
-        self.add_view(TicketLaunchView())
-        self.add_view(TicketControlView())
-        self.add_view(GiveawayJoinView())
+        await db.init()
+        self.add_view(TicketView())
+        self.check_giveaways.start()
+        await self.tree.sync()
 
     async def on_ready(self):
-        print(f"Logged in as {self.user} (ID: {self.user.id})")
-        try:
-            synced = await self.tree.sync()
-            print(f"Successfully synced {len(synced)} slash command(s).")
-        except Exception as e:
-            print(f"Error syncing commands: {e}")
+        print(f'Bot is online! Ingelogd als: {self.user.name} (ID: {self.user.id})')
+        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over de server"))
 
-        if not self.background_tasks.is_running():
-            self.background_tasks.start()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
 
-    @tasks.loop(seconds=30)
-    async def background_tasks(self):
-        now = datetime.datetime.utcnow()
-        # Tempban check
-        records = await db.fetchall("SELECT id, guild_id, user_id FROM tempbans WHERE unban_time <= ?", (now,))
-        for r in records:
-            tb_id, guild_id, user_id = r
-            guild = self.get_guild(guild_id)
-            if guild:
-                try:
-                    user = await self.fetch_user(user_id)
-                    await guild.unban(user, reason="Tempban expired.")
-                except Exception:
-                    pass
-            await db.execute("DELETE FROM tempbans WHERE id = ?", (tb_id,))
+        # AutoMod Check
+        row = await db.fetchone("SELECT automod_enabled FROM guild_settings WHERE guild_id = ?", (message.guild.id,))
+        if row and row[0] and not message.author.guild_permissions.manage_messages:
+            if self.invite_regex.search(message.content):
+                await message.delete()
+                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, uitnodigingen plaatsen is niet toegestaan!"), delete_after=5)
 
-        # Giveaway check
-        ended_g = await db.fetchall("SELECT message_id, channel_id, prize, winner_count FROM giveaways WHERE ended = 0 AND end_time <= ?", (now,))
-        for g in ended_g:
-            msg_id, channel_id, prize, winner_count = g
-            channel = self.get_channel(channel_id)
-            if channel:
-                try:
-                    msg = await channel.fetch_message(msg_id)
-                    participants = await db.fetchall("SELECT user_id FROM giveaway_participants WHERE message_id = ?", (msg_id,))
-                    if not participants:
-                        await channel.send(f"Giveaway for **{prize}** has ended! No valid participants.")
-                    else:
-                        winner_ids = [p[0] for p in participants]
-                        selected = random.sample(winner_ids, min(winner_count, len(winner_ids)))
-                        mentions = ", ".join([f"<@{uid}>" for uid in selected])
-                        await channel.send(f"🎉 Congratulations {mentions}! You won **{prize}**!")
-                    
-                    embed = msg.embeds[0]
-                    embed.title = "🎉 Giveaway Ended!"
-                    embed.color = 0x747F8D
-                    await msg.edit(embed=embed, view=None)
-                except Exception:
-                    pass
+            if len(message.content) > 10 and sum(1 for c in message.content if c.isupper()) / len(message.content) > 0.7:
+                await message.delete()
+                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, niet zo schreeuwen (te veel hoofdletters)!"), delete_after=5)
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type == discord.InteractionType.component:
+            custom_id = interaction.data.get("custom_id")
+            if custom_id == "persistent_close_ticket":
+                row = await db.fetchone("SELECT user_id FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
+                if row:
+                    await db.execute("DELETE FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
+                    await interaction.response.send_message("Ticket wordt gesloten...")
+                    await interaction.channel.delete()
+
+    @tasks.loop(seconds=10)
+    async def check_giveaways(self):
+        now = time.time()
+        ended_giveaways = await db.fetchall("SELECT message_id, channel_id, prize, winners FROM giveaways WHERE end_time <= ? AND ended = 0", (now,))
+        
+        for g in ended_giveaways:
+            msg_id, chan_id, prize, winners_cnt = g
             await db.execute("UPDATE giveaways SET ended = 1 WHERE message_id = ?", (msg_id,))
+            channel = self.get_channel(chan_id)
+            if not channel:
+                continue
+            try:
+                msg = await channel.fetch_message(msg_id)
+                reaction = discord.utils.get(msg.reactions, emoji="🎉")
+                users = [u async for u in reaction.users() if not u.bot] if reaction else []
+
+                if not users:
+                    await channel.send(f"🎉 Giveaway voor **{prize}** is afgelopen, maar er waren geen deelnemers!")
+                else:
+                    win_list = random.sample(users, min(len(users), winners_cnt))
+                    win_mentions = ", ".join([u.mention for u in win_list])
+                    await channel.send(f"🎉 Gefeliciteerd {win_mentions}! Je hebt **{prize}** gewonnen!")
+            except Exception:
+                pass
 
 bot = ModerationBot()
 
-# --- AUTOMOD ---
-@bot.event
-async def on_message(message):
-    if message.author.bot or not message.guild:
-        return
-    
-    # Block invite links for non-administrators
-    if not message.author.guild_permissions.administrator:
-        if "discord.gg/" in message.content.lower() or "discord.com/invite" in message.content.lower():
-            await message.delete()
-            return await message.channel.send(f"{message.author.mention}, posting invite links is prohibited!", delete_after=5)
-
-    await bot.process_commands(message)
-
-# --- SLASH COMMANDS ---
-@bot.tree.command(name="ban", description="Ban a user from the server.")
-@app_commands.checks.has_permissions(ban_members=True)
-async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-    await member.ban(reason=f"{reason} (By {interaction.user})")
-    await interaction.response.send_message(embed=success_embed(f"{member.mention} has been banned. | Reason: {reason}"))
-
-@bot.tree.command(name="kick", description="Kick a user from the server.")
+# ==========================================
+# SLASH COMMANDS
+# ==========================================
+@bot.tree.command(name="kick", description="Kopt een lid de server uit")
 @app_commands.checks.has_permissions(kick_members=True)
-async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-    await member.kick(reason=f"{reason} (By {interaction.user})")
-    await interaction.response.send_message(embed=success_embed(f"{member.mention} has been kicked. | Reason: {reason}"))
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "Geen reden opgegeven"):
+    await user.kick(reason=reason)
+    await interaction.response.send_message(embed=success_embed("Kicked", f"{user.mention} is gekickt.\n**Reden:** {reason}"))
 
-@bot.tree.command(name="timeout", description="Timeout a user (duration in minutes).")
+@bot.tree.command(name="ban", description="Verbant een lid van de server")
+@app_commands.checks.has_permissions(ban_members=True)
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "Geen reden opgegeven"):
+    await user.ban(reason=reason)
+    await interaction.response.send_message(embed=success_embed("Banned", f"{user.mention} is verbannen.\n**Reden:** {reason}"))
+
+@bot.tree.command(name="timeout", description="Zet een lid tijdelijk op mute/timeout")
 @app_commands.checks.has_permissions(moderate_members=True)
-async def timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason provided"):
+async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "Geen reden"):
     duration = datetime.timedelta(minutes=minutes)
-    await member.timeout(duration, reason=reason)
-    await interaction.response.send_message(embed=success_embed(f"{member.mention} has been timed out for {minutes} minutes."))
+    await user.timeout(duration, reason=reason)
+    await interaction.response.send_message(embed=success_embed("Timeout", f"{user.mention} is in timeout gezet voor {minutes} minuten."))
 
-@bot.tree.command(name="warn", description="Issue an official warning to a user.")
+@bot.tree.command(name="untimeout", description="Verwijder timeout van een lid")
+@app_commands.checks.has_permissions(moderate_members=True)
+async def untimeout(interaction: discord.Interaction, user: discord.Member):
+    await user.timeout(None)
+    await interaction.response.send_message(embed=success_embed("Timeout Opgeheven", f"Timeout van {user.mention} is verwijderd."))
+
+@bot.tree.command(name="warn", description="Geef een officiële waarschuwing aan een lid")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
     await db.execute("INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
-                     (interaction.guild.id, member.id, interaction.user.id, reason))
-    count = await db.fetchone("SELECT COUNT(*) FROM warnings WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, member.id))
-    await interaction.response.send_message(embed=warning_embed(f"Warned {member.mention}! Reason: {reason}\nTotal warnings: {count[0]}"))
+                     (interaction.guild_id, user.id, interaction.user.id, reason))
+    await interaction.response.send_message(embed=warning_embed("Waarschuwing", f"{user.mention} is GEWAARSCHUWD.\n**Reden:** {reason}"))
 
-@bot.tree.command(name="purge", description="Purge a specified number of messages.")
+@bot.tree.command(name="warnings", description="Bekijk waarschuwingen van een lid")
+async def warnings(interaction: discord.Interaction, user: discord.Member):
+    rows = await db.fetchall("SELECT id, reason, timestamp FROM warnings WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, user.id))
+    if not rows:
+        return await interaction.response.send_message(embed=success_embed("Waarschuwingen", f"{user.mention} heeft geen waarschuwingen."), ephemeral=True)
+    desc = "\n".join([f"`#{r[0]}` | **Reden:** {r[1]}" for r in rows])
+    await interaction.response.send_message(embed=create_embed(f"Waarschuwingen van {user.name}", desc))
+
+@bot.tree.command(name="purge", description="Verwijder een aantal berichten")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def purge(interaction: discord.Interaction, amount: int):
-    await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount)
-    await interaction.followup.send(embed=success_embed(f"Purged {len(deleted)} messages."), ephemeral=True)
+    await interaction.response.send_message(embed=success_embed("Purge", f"{len(deleted)} berichten verwijderd."), ephemeral=True)
 
-@bot.tree.command(name="ticketpanel", description="Send the ticket creation panel to this channel.")
+@bot.tree.command(name="automod", description="Schakel AutoMod in of uit")
 @app_commands.checks.has_permissions(administrator=True)
-async def ticketpanel(interaction: discord.Interaction):
-    embed = create_embed("Support Tickets", "Click the button below to open a support ticket.")
-    await interaction.channel.send(embed=embed, view=TicketLaunchView())
-    await interaction.response.send_message("Panel sent!", ephemeral=True)
+async def automod_toggle(interaction: discord.Interaction, enabled: bool):
+    await db.execute("INSERT INTO guild_settings (guild_id, automod_enabled) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET automod_enabled = ?",
+                     (interaction.guild_id, enabled, enabled))
+    status = "ingeschakeld" if enabled else "uitgeschakeld"
+    await interaction.response.send_message(embed=success_embed("AutoMod", f"AutoMod is nu **{status}**."))
 
-@bot.tree.command(name="gstart", description="Start a giveaway.")
-@app_commands.checks.has_permissions(manage_guild=True)
-async def gstart(interaction: discord.Interaction, minutes: int, winners: int, prize: str):
-    end_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
-    embed = create_embed("🎉 Giveaway!", f"**Prize:** {prize}\n**Winners:** {winners}\n**Ends:** <t:{int(end_time.timestamp())}:R>")
-    
-    await interaction.response.send_message("Giveaway started!", ephemeral=True)
-    msg = await interaction.channel.send(embed=embed, view=GiveawayJoinView())
-    
-    await db.execute("INSERT INTO giveaways (message_id, channel_id, guild_id, prize, end_time, winner_count) VALUES (?, ?, ?, ?, ?, ?)",
-                     (msg.id, interaction.channel.id, interaction.guild.id, prize, end_time, winners))
+@bot.tree.command(name="setup_tickets", description="Plaats het ticket paneel in dit kanaal")
+@app_commands.checks.has_permissions(administrator=True)
+async def setup_tickets(interaction: discord.Interaction, category: discord.CategoryChannel = None):
+    if category:
+        await db.execute("INSERT INTO ticket_configs (guild_id, category_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET category_id = ?",
+                         (interaction.guild_id, category.id, category.id))
+    await interaction.channel.send(embed=create_embed("Support Tickets", "Klik op het knopje om een ticket te openen."), view=TicketView())
+    await interaction.response.send_message(embed=success_embed("Tickets", "Ticket paneel geplaatst."), ephemeral=True)
+
+@bot.tree.command(name="giveaway", description="Start een giveaway")
+@app_commands.checks.has_permissions(manage_events=True)
+async def start_giveaway(interaction: discord.Interaction, duration_minutes: int, winners: int, prize: str):
+    end_time = time.time() + (duration_minutes * 60)
+    embed = create_embed(f"🎉 GIVEAWAY: {prize}", f"Klik op 🎉 om mee te doen!\n**Winnaars:** {winners}\n**Eindigt:** <t:{int(end_time)}:R>")
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
+    await msg.add_reaction("🎉")
+    await db.execute("INSERT INTO giveaways (message_id, channel_id, guild_id, prize, end_time, winners) VALUES (?, ?, ?, ?, ?, ?)",
+                     (msg.id, interaction.channel_id, interaction.guild_id, prize, end_time, winners))
+
+@bot.tree.command(name="userinfo", description="Bekijk informatie over een gebruiker")
+async def userinfo(interaction: discord.Interaction, user: discord.Member = None):
+    user = user or interaction.user
+    embed = create_embed(f"Gebruikersinfo - {user.name}", f"ID: `{user.id}`")
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.add_field(name="Geregistreerd", value=f"<t:{int(user.created_at.timestamp())}:D>", inline=True)
+    embed.add_field(name="Gejoined", value=f"<t:{int(user.joined_at.timestamp())}:D>", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="serverinfo", description="Bekijk informatie over deze server")
+async def serverinfo(interaction: discord.Interaction):
+    guild = interaction.guild
+    embed = create_embed(f"Serverinfo - {guild.name}", f"ID: `{guild.id}`")
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.add_field(name="Eigenaar", value=f"<@{guild.owner_id}>", inline=True)
+    embed.add_field(name="Leden", value=f"{guild.member_count}", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+# ==========================================
+# WEB SERVER (KEEP-ALIVE VOOR RENDER)
+# ==========================================
+async def handle_ping(request):
+    return web.Response(text="Bot is online en actief!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+
+# ==========================================
+# MAIN EXECUTION
+# ==========================================
+async def main():
+    if not DISCORD_TOKEN:
+        raise ValueError("DISCORD_TOKEN omgevingsvariabele ontbreekt!")
+
+    await start_web_server()
+    await bot.start(DISCORD_TOKEN)
 
 if __name__ == "__main__":
-    if not DISCORD_TOKEN:
-        raise ValueError("DISCORD_TOKEN environment variable is missing!")
-    bot.run(DISCORD_TOKEN)
+    asyncio.run(main())
