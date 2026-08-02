@@ -332,23 +332,35 @@ class ModerationBot(commands.Bot):
 bot = ModerationBot()
 
 # ==========================================
-# MODERATION COMMANDS
+# MODERATION COMMANDS (MET DM NOTIFICATIES)
 # ==========================================
 @bot.tree.command(name="kick", description="Kicks a member from the server")
 @app_commands.checks.has_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+    try:
+        await user.send(embed=error_embed("Kicked", f"You have been kicked from **{interaction.guild.name}**.\n**Reason:** {reason}"))
+    except Exception:
+        pass
     await user.kick(reason=reason)
     await interaction.response.send_message(embed=success_embed("Kicked", f"{user.mention} has been kicked.\n**Reason:** {reason}"))
 
 @bot.tree.command(name="ban", description="Bans a member from the server")
 @app_commands.checks.has_permissions(ban_members=True)
 async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+    try:
+        await user.send(embed=error_embed("Banned", f"You have been banned from **{interaction.guild.name}**.\n**Reason:** {reason}"))
+    except Exception:
+        pass
     await user.ban(reason=reason)
     await interaction.response.send_message(embed=success_embed("Banned", f"{user.mention} has been banned.\n**Reason:** {reason}"))
 
 @bot.tree.command(name="tempban", description="Temporarily ban a member for a duration in minutes")
 @app_commands.checks.has_permissions(ban_members=True)
 async def tempban(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason provided"):
+    try:
+        await user.send(embed=error_embed("Tempbanned", f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes} minutes**.\n**Reason:** {reason}"))
+    except Exception:
+        pass
     unban_time = time.time() + (minutes * 60)
     await user.ban(reason=f"Tempban for {minutes}m: {reason}")
     await db.execute("INSERT OR REPLACE INTO tempbans (guild_id, user_id, unban_time) VALUES (?, ?, ?)",
@@ -368,6 +380,10 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = "N
 @bot.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason provided"):
+    try:
+        await user.send(embed=error_embed("Timeout", f"You have been timed out in **{interaction.guild.name}** for **{minutes} minutes**.\n**Reason:** {reason}"))
+    except Exception:
+        pass
     duration = datetime.timedelta(minutes=minutes)
     await user.timeout(duration, reason=reason)
     await interaction.response.send_message(embed=success_embed("Timeout", f"{user.mention} has been timed out for {minutes} minutes."))
@@ -381,6 +397,10 @@ async def untimeout(interaction: discord.Interaction, user: discord.Member):
 @bot.tree.command(name="mute", description="Mute a member using a Muted role")
 @app_commands.checks.has_permissions(manage_roles=True)
 async def mute(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+    try:
+        await user.send(embed=error_embed("Muted", f"You have been muted in **{interaction.guild.name}**.\n**Reason:** {reason}"))
+    except Exception:
+        pass
     guild = interaction.guild
     row = await db.fetchone("SELECT muted_role_id FROM guild_settings WHERE guild_id = ?", (guild.id,))
     role = guild.get_role(row[0]) if row and row[0] else None
@@ -413,6 +433,10 @@ async def unmute(interaction: discord.Interaction, user: discord.Member):
 @bot.tree.command(name="warn", description="Issue a warning to a member")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+    try:
+        await user.send(embed=warning_embed("Warning", f"You have received a warning in **{interaction.guild.name}**.\n**Reason:** {reason}"))
+    except Exception:
+        pass
     await db.execute("INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
                      (interaction.guild_id, user.id, interaction.user.id, reason))
     await interaction.response.send_message(embed=warning_embed("Warning Issued", f"{user.mention} has been WARNED.\n**Reason:** {reason}"))
