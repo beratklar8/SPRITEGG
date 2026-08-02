@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 import aiosqlite
 from aiohttp import web
 from dotenv import load_dotenv
+from google import genai
 
 load_dotenv()
 
@@ -21,11 +22,15 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_data.db")
 PORT = int(os.getenv("PORT", 8080))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 COLOR_PRIMARY = 0x5865F2    # Blurple
 COLOR_SUCCESS = 0x57F287    # Green
 COLOR_WARNING = 0xFEE75C    # Yellow
 COLOR_ERROR = 0xED4245      # Red
+
+# Initialize Gemini AI Client
+ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # In-memory storage for sticky messages (channel_id: {"message": str, "last_msg_id": int})
 sticky_messages = {}
@@ -194,7 +199,29 @@ class ModerationBot(commands.Bot):
         if message.author.bot or not message.guild:
             return
 
-        # AutoMod Check
+        # 1. AI Chat Response when bot is mentioned (@SPRITEGG)
+        if self.user.mentioned_in(message) and not message.mention_everyone:
+            clean_content = message.content.replace(f'<@{self.user.id}>', '').replace(f'<@!{self.user.id}>', '').strip()
+            
+            if not clean_content:
+                return await message.channel.send(f"Hey {message.author.mention}! How can I help you today?")
+
+            async with message.channel.typing():
+                if ai_client:
+                    try:
+                        response = ai_client.models.generate_content(
+                            model='gemini-2.5-flash',
+                            contents=clean_content
+                        )
+                        reply_text = response.text[:1900]
+                        await message.reply(reply_text)
+                    except Exception as e:
+                        await message.reply("Sorry, I had trouble processing that request.")
+                else:
+                    await message.reply("AI is currently not configured. Please set the `GEMINI_API_KEY` environment variable.")
+            return
+
+        # 2. AutoMod Checks
         row = await db.fetchone("SELECT automod_enabled FROM guild_settings WHERE guild_id = ?", (message.guild.id,))
         if row and row[0] and not message.author.guild_permissions.manage_messages:
             if self.invite_regex.search(message.content):
@@ -205,7 +232,7 @@ class ModerationBot(commands.Bot):
                 await message.delete()
                 return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, please avoid excessive caps!"), delete_after=5)
 
-        # Sticky Messages Handler
+        # 3. Sticky Message Handler
         if message.channel.id in sticky_messages:
             sticky_data = sticky_messages[message.channel.id]
             if sticky_data.get("last_msg_id"):
