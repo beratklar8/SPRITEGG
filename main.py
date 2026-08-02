@@ -217,7 +217,6 @@ class ModerationBot(commands.Bot):
             async with message.channel.typing():
                 if ai_client:
                     try:
-                        # Gebruik gemini-2.0-flash voor optimale werking
                         response = await ai_client.aio.models.generate_content(
                             model='gemini-2.0-flash',
                             contents=clean_content
@@ -226,8 +225,10 @@ class ModerationBot(commands.Bot):
                         await message.reply(reply_text)
                     except Exception as e:
                         print(f"AI ERROR DETAIL: {type(e).__name__} - {e}")
-                        traceback.print_exc()
-                        await message.reply(f"⚠️ AI Error: `{type(e).__name__}` - {e}")
+                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            await message.reply("⚠️ You reached your max message limit. Try again in a couple of minutes!")
+                        else:
+                            await message.reply(f"⚠️ AI Error: `{type(e).__name__}` - {e}")
                 else:
                     await message.reply("⚠️ AI is momenteel niet geconfigureerd. Controleer of de `GEMINI_API_KEY` omgevingsvariabele is ingesteld.")
             return
