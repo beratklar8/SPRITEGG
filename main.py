@@ -199,7 +199,10 @@ class ModerationBot(commands.Bot):
 
     async def on_ready(self):
         print(f'Bot is online! Logged in as: {self.user.name} (ID: {self.user.id})')
-        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over the server"))
+        # HIER PAS JE DE STATUS / BIO TEKST AAN:
+        await self.change_presence(
+            activity=discord.CustomActivity(name="Chat via mentions | /help")
+        )
 
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -215,9 +218,9 @@ class ModerationBot(commands.Bot):
             async with message.channel.typing():
                 if ai_client:
                     try:
-                        # Gebruik gemini-2.5-flash
+                        # Gebruik gemini-1.5-flash-8b voor maximale comptabiliteit
                         response = await ai_client.aio.models.generate_content(
-                            model='gemini-2.5-flash',
+                            model='gemini-1.5-flash-8b',
                             contents=clean_content
                         )
                         reply_text = response.text[:1900]
