@@ -215,9 +215,9 @@ class ModerationBot(commands.Bot):
             async with message.channel.typing():
                 if ai_client:
                     try:
-                        # Native Async Call naar het stabiele gemini-1.5-flash model
+                        # Native Async Call naar gemini-2.0-flash-lite
                         response = await ai_client.aio.models.generate_content(
-                            model='gemini-1.5-flash',
+                            model='gemini-2.0-flash-lite',
                             contents=clean_content
                         )
                         reply_text = response.text[:1900]
