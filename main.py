@@ -17,160 +17,228 @@ from google import genai
 
 load_dotenv()
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_data.db")
-PORT = int(os.getenv("PORT", 8080))
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# =====================================================================
+# CONFIGURATION & ENVIRONMENT SETUP
+# =====================================================================
+BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+DATABASE_NAME = os.getenv("DATABASE_PATH", "bot_production_v4.db")
+WEB_PORT = int(os.getenv("PORT", 8080))
+GEMINI_API_SECRET = os.getenv("GEMINI_API_KEY")
 
-COLOR_PRIMARY = 0x5865F2    # Blurple
-COLOR_SUCCESS = 0x57F287    # Green
-COLOR_WARNING = 0xFEE75C    # Yellow
-COLOR_ERROR = 0xED4245      # Red
+COLOR_NEUTRAL = 0x2B2D31
+COLOR_SUCCESS = 0x2ECC71
+COLOR_WARNING = 0xF1C40F
+COLOR_DANGER = 0xE74C3C
+COLOR_INFO = 0x3498DB
+COLOR_PURPLE = 0x9B59B6
 
-# Initialize Gemini AI Client
-ai_client = None
-if GEMINI_API_KEY:
+# Initialize Gemini Client safely with advanced safety fallbacks
+gemini_api_client = None
+if GEMINI_API_SECRET:
     try:
-        ai_client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print(f"Error initializing Gemini Client: {e}")
+        gemini_api_client = genai.Client(api_key=GEMINI_API_SECRET)
+    except Exception as initialization_exception:
+        print(f"Failed to initialize Gemini client: {initialization_exception}")
 
-# In-memory storage for sticky messages
+# In-memory stores for active features
 sticky_messages = {}
+afk_users = {}
+user_eco_cache = {}
+user_cooldowns = {}
 
-# ==========================================
-# EMBED HELPERS
-# ==========================================
-def create_embed(title: str, description: str, color: int = COLOR_PRIMARY) -> discord.Embed:
-    return discord.Embed(title=title, description=description, color=color)
+# =====================================================================
+# EMBED UTILITY FACTORY
+# =====================================================================
+def make_embed(title: str, description: str, color: int = COLOR_NEUTRAL) -> discord.Embed:
+    """Constructs a standardized base embed container with automatic timestamp."""
+    embed_instance = discord.Embed(title=title, description=description, color=color)
+    embed_instance.timestamp = datetime.datetime.now(datetime.timezone.utc)
+    return embed_instance
 
 def success_embed(title: str, description: str) -> discord.Embed:
-    return create_embed(f"✅ {title}", description, COLOR_SUCCESS)
+    """Constructs a success status embed."""
+    return make_embed(f"✔ {title}", description, COLOR_SUCCESS)
 
 def error_embed(title: str, description: str) -> discord.Embed:
-    return create_embed(f"❌ {title}", description, COLOR_ERROR)
+    """Constructs an error alert embed."""
+    return make_embed(f"✖ {title}", description, COLOR_DANGER)
 
 def warning_embed(title: str, description: str) -> discord.Embed:
-    return create_embed(f"⚠️ {title}", description, COLOR_WARNING)
+    """Constructs a warning status embed."""
+    return make_embed(f"⚠ {title}", description, COLOR_WARNING)
 
-# ==========================================
-# DATABASE MANAGEMENT
-# ==========================================
-class Database:
-    def __init__(self, db_path: str = DATABASE_PATH):
+def info_embed(title: str, description: str) -> discord.Embed:
+    """Constructs an information status embed."""
+    return make_embed(f"ℹ {title}", description, COLOR_INFO)
+
+# =====================================================================
+# ADVANCED DATABASE CONTROLLER LAYER
+# =====================================================================
+class DatabaseController:
+    """Manages all asynchronous SQLite database interactions and extensive schema bootstrapping."""
+    def __init__(self, db_path: str = DATABASE_NAME):
         self.db_path = db_path
 
-    async def init(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS warnings (
+    async def initialize_database(self):
+        """Creates all necessary relational tables if they do not already exist."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS warning_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER,
-                    user_id INTEGER,
+                    target_id INTEGER,
                     moderator_id INTEGER,
                     reason TEXT,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS tempbans (
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS temporary_bans (
                     guild_id INTEGER,
-                    user_id INTEGER,
-                    unban_time REAL,
-                    PRIMARY KEY (guild_id, user_id)
+                    target_id INTEGER,
+                    expiry_timestamp REAL,
+                    PRIMARY KEY (guild_id, target_id)
                 )
             """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS ticket_configs (
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ticket_settings (
                     guild_id INTEGER PRIMARY KEY,
                     category_id INTEGER
                 )
             """)
-            await db.execute("""
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS active_tickets (
                     channel_id INTEGER PRIMARY KEY,
                     guild_id INTEGER,
-                    user_id INTEGER
+                    target_id INTEGER
                 )
             """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS giveaways (
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS giveaway_system (
                     message_id INTEGER PRIMARY KEY,
                     channel_id INTEGER,
                     guild_id INTEGER,
-                    prize TEXT,
-                    end_time REAL,
-                    winners INTEGER,
-                    ended BOOLEAN DEFAULT 0
+                    prize_name TEXT,
+                    ends_at REAL,
+                    is_ended BOOLEAN DEFAULT 0
                 )
             """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS guild_settings (
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS server_settings (
                     guild_id INTEGER PRIMARY KEY,
-                    automod_enabled BOOLEAN DEFAULT 0,
-                    muted_role_id INTEGER,
-                    log_channel_id INTEGER
+                    automod_status BOOLEAN DEFAULT 0,
+                    log_channel_id INTEGER,
+                    welcome_channel_id INTEGER,
+                    welcome_message TEXT
                 )
             """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS reaction_roles (
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS reaction_role_bindings (
                     message_id INTEGER,
-                    emoji TEXT,
+                    emoji_icon TEXT,
                     role_id INTEGER,
-                    PRIMARY KEY (message_id, emoji)
+                    PRIMARY KEY (message_id, emoji_icon)
                 )
             """)
-            await db.commit()
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS vouch_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    recipient_id INTEGER,
+                    author_id INTEGER,
+                    comment TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS economy_balances (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    wallet INTEGER DEFAULT 0,
+                    bank INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS leveling_system (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    xp INTEGER DEFAULT 0,
+                    level INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS custom_tags (
+                    guild_id INTEGER,
+                    tag_name TEXT,
+                    tag_content TEXT,
+                    PRIMARY KEY (guild_id, tag_name)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    target_id INTEGER,
+                    author_id INTEGER,
+                    note_content TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.commit()
 
-    async def execute(self, query: str, parameters: tuple = ()):
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(query, parameters)
-            await db.commit()
+    async def execute(self, query: str, params: tuple = ()):
+        """Executes a modification query against the database safely."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(query, params)
+            await conn.commit()
             return cursor
 
-    async def fetchone(self, query: str, parameters: tuple = ()):
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(query, parameters) as cursor:
+    async def fetchone(self, query: str, params: tuple = ()):
+        """Fetches a single row from the database safely."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            async with conn.execute(query, params) as cursor:
                 return await cursor.fetchone()
 
-    async def fetchall(self, query: str, parameters: tuple = ()):
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(query, parameters) as cursor:
+    async def fetchall(self, query: str, params: tuple = ()):
+        """Fetches multiple rows from the database safely."""
+        async with aiosqlite.connect(self.db_path) as conn:
+            async with conn.execute(query, params) as cursor:
                 return await cursor.fetchall()
 
-db = Database()
+db_controller = DatabaseController()
 
-# ==========================================
-# HELPER FOR LOGGING
-# ==========================================
-async def send_log(guild: discord.Guild, embed: discord.Embed):
+# =====================================================================
+# AUDIT LOG DISPATCHER HELPER
+# =====================================================================
+async def dispatch_audit_log(guild: discord.Guild, embed: discord.Embed):
+    """Dispatches operational logs to the designated server audit channel securely."""
     if not guild:
         return
-    row = await db.fetchone("SELECT log_channel_id FROM guild_settings WHERE guild_id = ?", (guild.id,))
-    if row and row[0]:
-        channel = guild.get_channel(row[0])
-        if channel:
+    res = await db_controller.fetchone("SELECT log_channel_id FROM server_settings WHERE guild_id = ?", (guild.id,))
+    if res and res[0]:
+        target_channel = guild.get_channel(res[0])
+        if target_channel:
             try:
-                await channel.send(embed=embed)
+                await target_channel.send(embed=embed)
             except Exception:
                 pass
 
-# ==========================================
-# PERSISTENT VIEWS (TICKETS)
-# ==========================================
-class TicketView(discord.ui.View):
+# =====================================================================
+# PERSISTENT VIEWS: TICKET SYSTEM INTERFACE
+# =====================================================================
+class TicketCreationView(discord.ui.View):
+    """Persistent user interface panel for handling community help tickets."""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="📩 Open Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_open_ticket")
+    @discord.ui.button(label="Open Support Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_ticket_open_btn_v4")
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
-        row = await db.fetchone("SELECT category_id FROM ticket_configs WHERE guild_id = ?", (guild.id,))
-        category_id = row[0] if row else None
-        category = guild.get_channel(category_id) if category_id else None
+        res = await db_controller.fetchone("SELECT category_id FROM ticket_settings WHERE guild_id = ?", (guild.id,))
+        cat_id = res[0] if res else None
+        category_obj = guild.get_channel(cat_id) if cat_id else None
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -178,26 +246,32 @@ class TicketView(discord.ui.View):
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
 
-        channel = await guild.create_text_channel(
+        ticket_chan = await guild.create_text_channel(
             name=f"ticket-{interaction.user.name}",
-            category=category,
+            category=category_obj,
             overwrites=overwrites
         )
 
-        await db.execute("INSERT INTO active_tickets (channel_id, guild_id, user_id) VALUES (?, ?, ?)",
-                         (channel.id, guild.id, interaction.user.id))
+        await db_controller.execute(
+            "INSERT INTO active_tickets (channel_id, guild_id, target_id) VALUES (?, ?, ?)",
+            (ticket_chan.id, guild.id, interaction.user.id)
+        )
 
         close_view = discord.ui.View(timeout=None)
-        close_btn = discord.ui.Button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="persistent_close_ticket")
+        close_btn = discord.ui.Button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="persistent_ticket_close_btn_v4")
         close_view.add_item(close_btn)
 
-        await channel.send(embed=create_embed("Ticket Created", f"Welcome {interaction.user.mention}! Please describe your issue or question."), view=close_view)
-        await interaction.response.send_message(content=f"Ticket created in {channel.mention}!", ephemeral=True)
+        await ticket_chan.send(
+            embed=make_embed("Support System", f"Welcome {interaction.user.mention}!\nPlease describe your inquiry in full detail below. Support staff will be with you shortly."),
+            view=close_view
+        )
+        await interaction.response.send_message(content=f"Your ticket has been opened successfully: {ticket_chan.mention}", ephemeral=True)
 
-# ==========================================
-# MAIN BOT CLASS
-# ==========================================
-class ModerationBot(commands.Bot):
+# =====================================================================
+# CORE BOT CLIENT IMPLEMENTATION (EXTENSIVE EVENT ARCHITECTURE)
+# =====================================================================
+class ExtendedBotClient(commands.Bot):
+    """Main application client encapsulating advanced event handlers, filters, and background loops."""
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -207,263 +281,224 @@ class ModerationBot(commands.Bot):
         intents.voice_states = True
         intents.invites = True
         super().__init__(command_prefix="!", intents=intents)
-        self.invite_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
-        self.invites = {}
+        
+        self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
+        self.url_regex = re.compile(r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+")
+        self.server_invite_cache = {}
 
     async def setup_hook(self):
-        await db.init()
-        self.add_view(TicketView())
-        self.check_giveaways.start()
-        self.check_tempbans.start()
+        """Asynchronous initialization routine for views, background tasks, and command tree synchronization."""
+        await db_controller.initialize_database()
+        self.add_view(TicketCreationView())
+        self.background_giveaway_loop.start()
+        self.background_tempban_loop.start()
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f'Bot is online! Logged in as: {self.user.name} (ID: {self.user.id})')
-        await self.change_presence(
-            activity=discord.CustomActivity(name="Chat via mentions | /help")
-        )
+        """Fires when the bot establishes connection and completes initialization."""
+        print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
+        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security & moderation | /help"))
         for guild in self.guilds:
             try:
-                self.invites[guild.id] = await guild.invites()
+                self.server_invite_cache[guild.id] = await guild.invites()
             except Exception:
                 pass
 
     async def on_message(self, message: discord.Message):
+        """Comprehensive message event listener handling AI interactions, XP systems, AFK checks, automod, and sticky posts."""
         if message.author.bot or not message.guild:
             return
 
-        # 1. AI Chat Response when bot is mentioned
+        # 1. AFK Status System Handler
+        if message.author.id in afk_users:
+            del afk_users[message.author.id]
+            try:
+                await message.channel.send(f"Welcome back {message.author.mention}, I have removed your AFK status.", delete_after=5)
+            except Exception:
+                pass
+
+        for mention in message.mentions:
+            if mention.id in afk_users:
+                afk_reason = afk_users[mention.id]
+                await message.channel.send(f"⚠ **{mention.name}** is currently AFK: {afk_reason}", delete_after=10)
+
+        # 2. Leveling & XP Accumulation Engine
+        user_key = (message.guild.id, message.author.id)
+        res_xp = await db_controller.fetchone("SELECT xp, level FROM leveling_system WHERE guild_id = ? AND user_id = ?", user_key)
+        
+        current_xp = res_xp[0] if res_xp else 0
+        current_lvl = res_xp[1] if res_xp else 0
+        
+        gained_xp = random.randint(15, 25)
+        new_xp = current_xp + gained_xp
+        required_xp = (current_lvl + 1) * 250
+
+        if new_xp >= required_xp:
+            current_lvl += 1
+            new_xp = 0
+            await db_controller.execute(
+                "INSERT OR REPLACE INTO leveling_system (guild_id, user_id, xp, level) VALUES (?, ?, ?, ?)",
+                (message.guild.id, message.author.id, new_xp, current_lvl)
+            )
+            try:
+                await message.channel.send(embed=success_embed("Level Up!", f"Congratulations {message.author.mention}, you advanced to **Level {current_lvl}**!"), delete_after=8)
+            except Exception:
+                pass
+        else:
+            if res_xp:
+                await db_controller.execute("UPDATE leveling_system SET xp = ? WHERE guild_id = ? AND user_id = ?", (new_xp, message.guild.id, message.author.id))
+            else:
+                await db_controller.execute("INSERT INTO leveling_system (guild_id, user_id, xp, level) VALUES (?, ?, ?, 0)", (message.guild.id, message.author.id, new_xp))
+
+        # 3. Gemini AI Integration Handler
         if self.user.mentioned_in(message) and not message.mention_everyone:
-            clean_content = message.content.replace(f'<@{self.user.id}>', '').replace(f'<@!{self.user.id}>', '').strip()
+            clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
             
-            if not clean_content:
-                return await message.channel.send(f"Hey {message.author.mention}! How can I help you today?")
+            if not clean_text:
+                return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your queries today?")
 
             async with message.channel.typing():
-                if ai_client:
+                if gemini_api_client:
                     try:
-                        response = await ai_client.aio.models.generate_content(
-                            model='gemini-2.0-flash',
-                            contents=clean_content
+                        ai_response = await gemini_api_client.aio.models.generate_content(
+                            model="gemini-2.0-flash",
+                            contents=clean_text
                         )
-                        reply_text = response.text[:1900]
-                        await message.reply(reply_text)
-                    except Exception as e:
+                        await message.reply(ai_response.text[:1900])
+                    except Exception as err:
                         traceback.print_exc()
-                        error_str = str(e)
-                        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                            await message.reply("You have reached your message limit, please try again later.")
+                        err_msg = str(err)
+                        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                            await message.reply("API rate limit reached. Please try your request again shortly.")
                         else:
-                            await message.reply(
-                                f"❌ Gemini Error\n"
-                                f"Type: `{type(e).__name__}`\n"
-                                f"Message:\n```{e}```"
-                            )
+                            await message.reply(f"AI error encountered: `{type(err).__name__}`")
 
-        # 2. AutoMod Checks
-        row = await db.fetchone("SELECT automod_enabled FROM guild_settings WHERE guild_id = ?", (message.guild.id,))
-        if row and row[0] and not message.author.guild_permissions.manage_messages:
-            if self.invite_regex.search(message.content):
+        # 4. Advanced Automod Filter Suite
+        settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (message.guild.id,))
+        if settings and settings[0] and not message.author.guild_permissions.manage_messages:
+            if self.invite_link_regex.search(message.content):
                 await message.delete()
-                await send_log(message.guild, warning_embed("AutoMod Log", f"Deleted invite link from {message.author.mention} in {message.channel.mention}."))
-                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, posting invite links is not allowed!"), delete_after=5)
+                await dispatch_audit_log(message.guild, warning_embed("Automod Action Triggered", f"Blocked unauthorized invite link sent by {message.author.mention} in {message.channel.mention}."))
+                return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, server invite links are strictly prohibited."), delete_after=5)
 
-            if len(message.content) > 10 and sum(1 for c in message.content if c.isupper()) / len(message.content) > 0.7:
+            if len(message.content) > 10 and sum(1 for c in message.content if c.isupper()) / len(message.content) > 0.8:
                 await message.delete()
-                await send_log(message.guild, warning_embed("AutoMod Log", f"Deleted excessive caps message from {message.author.mention} in {message.channel.mention}."))
-                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, please avoid excessive caps!"), delete_after=5)
+                await dispatch_audit_log(message.guild, warning_embed("Automod Action Triggered", f"Removed uppercase text spam sent by {message.author.mention} in {message.channel.mention}."))
+                return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, please avoid excessive capitalization."), delete_after=5)
 
-        # 3. Sticky Message Handler
+        # 5. Sticky Messages Handler
         if message.channel.id in sticky_messages:
             sticky_data = sticky_messages[message.channel.id]
-            if sticky_data.get("last_msg_id"):
+            if sticky_data.get("message_id"):
                 try:
-                    old_msg = await message.channel.fetch_message(sticky_data["last_msg_id"])
+                    old_msg = await message.channel.fetch_message(sticky_data["message_id"])
                     await old_msg.delete()
                 except Exception:
                     pass
-            new_msg = await message.channel.send(embed=create_embed("📌 Sticky Message", sticky_data["message"]))
-            sticky_messages[message.channel.id]["last_msg_id"] = new_msg.id
+            new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_data["text"]))
+            sticky_messages[message.channel.id]["message_id"] = new_sticky.id
 
-    # ==========================================
-    # DETAILED AUDIT LOG EVENTS (UPDATED)
-    # ==========================================
+    # =====================================================================
+    # EXTENSIVE AUDIT LOGGING EVENT LISTENERS
+    # =====================================================================
     async def on_member_join(self, member: discord.Member):
         guild = member.guild
         used_invite = None
         try:
-            old_invites = self.invites.get(guild.id, [])
+            old_invites = self.server_invite_cache.get(guild.id, [])
             new_invites = await guild.invites()
-            self.invites[guild.id] = new_invites
-            for inv in new_invites:
-                for old in old_invites:
-                    if inv.code == old.code and inv.uses > old.uses:
-                        used_invite = inv
+            self.server_invite_cache[guild.id] = new_invites
+            for new_inv in new_invites:
+                for old_inv in old_invites:
+                    if new_inv.code == old_inv.code and new_inv.uses > old_inv.uses:
+                        used_invite = new_inv
                         break
         except Exception:
             pass
 
-        inv_text = f"**Invite Code:** `{used_invite.code}` (Created by {used_invite.inviter.mention}, Uses: `{used_invite.uses}`)" if used_invite else "**Invite Info:** Unknown"
-        embed = success_embed("MEMBER JOIN", f"**User:** {member.mention} (`{member.id}`)\n{inv_text}\n**Account Age:** <t:{int(member.created_at.timestamp())}:R>")
-        await send_log(guild, embed)
+        invite_details = f"Invite: `{used_invite.code}` (Inviter: {used_invite.inviter}, Total Uses: {used_invite.uses})" if used_invite else "Invite tracking data unavailable"
+        await dispatch_audit_log(guild, success_embed("Member Joined", f"**Member:** {member.mention} (`{member.id}`)\n{invite_details}"))
+
+        res = await db_controller.fetchone("SELECT welcome_channel_id, welcome_message FROM server_settings WHERE guild_id = ?", (guild.id,))
+        if res and res[0] and res[1]:
+            w_chan = guild.get_channel(res[0])
+            if w_chan:
+                try:
+                    formatted_msg = res[1].replace("{user}", member.mention).replace("{server}", guild.name)
+                    await w_chan.send(formatted_msg)
+                except Exception:
+                    pass
 
     async def on_member_remove(self, member: discord.Member):
-        embed = error_embed("MEMBER LEAVE", f"**User:** {member.mention} (`{member.id}`)")
-        await send_log(member.guild, embed)
+        await dispatch_audit_log(member.guild, error_embed("Member Left", f"**Member:** {member.mention} (`{member.id}`)"))
 
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         guild = after.guild
-        
-        # MEMBER ROLE ADD / REMOVE
-        before_roles = set(before.roles)
-        after_roles = set(after.roles)
-        
-        added_roles = after_roles - before_roles
-        for role in added_roles:
-            embed = success_embed("MEMBER ROLE ADD", f"**User:** {after.mention}\n**Role:** {role.mention} (`{role.id}`)")
-            await send_log(guild, embed)
-            
-        removed_roles = before_roles - after_roles
-        for role in removed_roles:
-            embed = warning_embed("MEMBER ROLE REMOVE", f"**User:** {after.mention}\n**Role:** {role.mention} (`{role.id}`)")
-            await send_log(guild, embed)
+        old_roles = set(before.roles)
+        new_roles = set(after.roles)
 
-        # MEMBER TIMEOUT (NEW)
-        if before.timed_out_until != after.timed_out_until:
-            if after.is_timed_out():
-                embed = warning_embed("MEMBER TIMEOUT", f"**User:** {after.mention} (`{after.id}`)\n**Timed out until:** <t:{int(after.timed_out_until.timestamp())}:F>")
-                await send_log(guild, embed)
+        for role in new_roles - old_roles:
+            await dispatch_audit_log(guild, success_embed("Role Assigned", f"**Member:** {after.mention}\n**Role:** {role.mention}"))
+        for role in old_roles - new_roles:
+            await dispatch_audit_log(guild, warning_embed("Role Removed", f"**Member:** {after.mention}\n**Role:** {role.mention}"))
 
-        # NICKNAME CHANGE
+        if before.timed_out_until != after.timed_out_until and after.is_timed_out():
+            await dispatch_audit_log(guild, warning_embed("Timeout Applied", f"**Member:** {after.mention}\n**Until:** <t:{int(after.timed_out_until.timestamp())}:F>"))
+
         if before.nick != after.nick:
-            embed = create_embed("NICKNAME CHANGE", f"**User:** {after.mention} (`{after.id}`)\n**Before:** `{before.nick or before.name}`\n**After:** `{after.nick or after.name}`", COLOR_WARNING)
-            await send_log(guild, embed)
+            await dispatch_audit_log(guild, make_embed("Nickname Modified", f"**Member:** {after.mention}\nBefore: `{before.nick or before.name}`\nAfter: `{after.nick or after.name}`", COLOR_WARNING))
 
-    async def on_member_ban(self, guild: discord.Guild, user: discord.User | discord.Member):
-        embed = error_embed("MEMBER BAN", f"**User:** {user.mention} (`{user.id}`)")
-        await send_log(guild, embed)
+    async def on_member_ban(self, guild: discord.Guild, user: discord.abc.User):
+        await dispatch_audit_log(guild, error_embed("User Banned", f"**User:** {user.mention} (`{user.id}`)"))
 
-    async def on_member_unban(self, guild: discord.Guild, user: discord.User):
-        embed = success_embed("MEMBER UNBAN", f"**User:** {user.mention} (`{user.id}`)")
-        await send_log(guild, embed)
-
-    async def on_guild_emojis_update(self, guild: discord.Guild, before: tuple[discord.Emoji, ...], after: tuple[discord.Emoji, ...]):
-        before_map = {e.id: e for e in before}
-        after_map = {e.id: e for e in after}
-
-        # EMOJI CREATE
-        if len(after) > len(before):
-            added = set(after_map.keys()) - set(before_map.keys())
-            for eid in added:
-                emoji = after_map[eid]
-                embed = success_embed("EMOJI CREATE", f"**Emoji:** {emoji} (`{emoji.name}`)")
-                await send_log(guild, embed)
-        # EMOJI DELETE
-        elif len(after) < len(before):
-            removed = set(before_map.keys()) - set(after_map.keys())
-            for eid in removed:
-                emoji = before_map[eid]
-                embed = error_embed("EMOJI DELETE", f"**Emoji Name:** `{emoji.name}` (`{emoji.id}`)")
-                await send_log(guild, embed)
-
-        # EMOJI NAME CHANGE
-        for eid in set(before_map.keys()).intersection(set(after_map.keys())):
-            b_emoji = before_map[eid]
-            a_emoji = after_map[eid]
-            if b_emoji.name != a_emoji.name:
-                embed = create_embed("EMOJI NAME CHANGE", f"**Emoji:** {a_emoji}\n**Before:** `{b_emoji.name}`\n**After:** `{a_emoji.name}`", COLOR_WARNING)
-                await send_log(guild, embed)
+    async def on_member_unban(self, guild: discord.Guild, user: discord.abc.User):
+        await dispatch_audit_log(guild, success_embed("User Unbanned", f"**User:** {user.mention} (`{user.id}`)"))
 
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         guild = member.guild
-        # VOICE CHANNEL JOIN
         if not before.channel and after.channel:
-            embed = success_embed("VOICE CHANNEL JOIN", f"**User:** {member.mention} joined {after.channel.mention}")
-            await send_log(guild, embed)
-        # VOICE CHANNEL LEAVE
+            await dispatch_audit_log(guild, success_embed("Voice Channel Joined", f"**Member:** {member.mention} joined {after.channel.mention}"))
         elif before.channel and not after.channel:
-            embed = error_embed("VOICE CHANNEL LEAVE", f"**User:** {member.mention} left {before.channel.mention}")
-            await send_log(guild, embed)
-        # VOICE CHANNEL MOVE
+            await dispatch_audit_log(guild, error_embed("Voice Channel Left", f"**Member:** {member.mention} left {before.channel.mention}"))
         elif before.channel and after.channel and before.channel.id != after.channel.id:
-            embed = create_embed("VOICE CHANNEL MOVE", f"**User:** {member.mention} moved from {before.channel.mention} to {after.channel.mention}", COLOR_WARNING)
-            await send_log(guild, embed)
+            await dispatch_audit_log(guild, make_embed("Voice Channel Switched", f"**Member:** {member.mention} moved from {before.channel.mention} to {after.channel.mention}", COLOR_WARNING))
 
     async def on_guild_role_create(self, role: discord.Role):
-        embed = success_embed("ROLE CREATE", f"**Role:** {role.mention} (`{role.id}`)")
-        await send_log(role.guild, embed)
+        await dispatch_audit_log(role.guild, success_embed("Role Created", f"**Role:** {role.mention}"))
 
     async def on_guild_role_delete(self, role: discord.Role):
-        embed = error_embed("ROLE DELETE", f"**Role:** `{role.name}` (`{role.id}`)")
-        await send_log(role.guild, embed)
-
-    async def on_guild_role_update(self, before: discord.Role, after: discord.Role):
-        embed = create_embed("ROLE UPDATE", f"**Role:** {after.mention} (`{after.id}`) updated.", COLOR_WARNING)
-        await send_log(after.guild, embed)
+        await dispatch_audit_log(role.guild, error_embed("Role Deleted", f"**Role Name:** `{role.name}`"))
 
     async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
-        embed = success_embed("CHANNEL CREATE", f"**Channel:** {channel.mention} (`{channel.id}`)")
-        await send_log(channel.guild, embed)
-
-    async def on_guild_channel_update(self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
-        embed = create_embed("CHANNEL UPDATE", f"**Channel:** {after.mention} (`{after.id}`) settings were updated.", COLOR_WARNING)
-        await send_log(after.guild, embed)
+        await dispatch_audit_log(channel.guild, success_embed("Channel Created", f"**Channel:** {channel.mention}"))
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
-        embed = error_embed("CHANNEL DELETE", f"**Channel:** `{channel.name}` (`{channel.id}`)")
-        await send_log(channel.guild, embed)
+        await dispatch_audit_log(channel.guild, error_embed("Channel Deleted", f"**Channel Name:** `{channel.name}`"))
 
     async def on_message_delete(self, message: discord.Message):
         if not message.guild or message.author.bot:
             return
-        
-        has_image = any(att.content_type and 'image' in att.content_type for att in message.attachments)
-        if has_image:
-            embed = warning_embed("IMAGE DELETE", f"**Author:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}")
-        else:
-            content = message.content or "[No text]"
-            embed = warning_embed("MESSAGE DELETE", f"**Author:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}\n**Content:**\n```{content[:1000]}```")
-        await send_log(message.guild, embed)
-
-    async def on_bulk_message_delete(self, messages: list[discord.Message]):
-        if not messages or not messages[0].guild:
-            return
-        guild = messages[0].guild
-        embed = warning_embed("BULK MESSAGE DELETE", f"**Amount:** `{len(messages)}` messages deleted in {messages[0].channel.mention}.")
-        await send_log(guild, embed)
-
-    async def on_raw_message_update(self, payload: discord.RawMessageUpdateEvent):
-        if not payload.guild_id:
-            return
-        guild = self.get_guild(payload.guild_id)
-        if not guild:
-            return
-        data = payload.data
-        if "content" in data:
-            new_content = data.get("content")
-            embed = create_embed("MESSAGE EDIT", f"**Channel:** <#{payload.channel_id}>\n**New Content:**\n```{new_content[:1000]}```", COLOR_WARNING)
-            await send_log(guild, embed)
+        content_txt = message.content or "[No text data available]"
+        await dispatch_audit_log(message.guild, warning_embed("Message Deleted", f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}```"))
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.user.id:
             return
-        emoji_str = str(payload.emoji)
-        row = await db.fetchone("SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?", (payload.message_id, emoji_str))
-        if row:
+        res = await db_controller.fetchone("SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?", (payload.message_id, str(payload.emoji)))
+        if res:
             guild = self.get_guild(payload.guild_id)
             if guild:
-                role = guild.get_role(row[0])
+                role = guild.get_role(res[0])
                 member = guild.get_member(payload.user_id)
                 if role and member:
                     await member.add_roles(role)
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
-        emoji_str = str(payload.emoji)
-        row = await db.fetchone("SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?", (payload.message_id, emoji_str))
-        if row:
+        res = await db_controller.fetchone("SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?", (payload.message_id, str(payload.emoji)))
+        if res:
             guild = self.get_guild(payload.guild_id)
             if guild:
-                role = guild.get_role(row[0])
+                role = guild.get_role(res[0])
                 member = guild.get_member(payload.user_id)
                 if role and member:
                     await member.remove_roles(role)
@@ -471,438 +506,389 @@ class ModerationBot(commands.Bot):
     async def on_interaction(self, interaction: discord.Interaction):
         if interaction.type == discord.InteractionType.component:
             custom_id = interaction.data.get("custom_id")
-            if custom_id == "persistent_close_ticket":
-                row = await db.fetchone("SELECT user_id FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
-                if row:
-                    await db.execute("DELETE FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
-                    await interaction.response.send_message("Closing ticket...")
-                    await send_log(interaction.guild, create_embed("Ticket Closed", f"Ticket channel {interaction.channel.name} was closed."))
+            if custom_id == "persistent_ticket_close_btn_v4":
+                record = await db_controller.fetchone("SELECT target_id FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
+                if record:
+                    await db_controller.execute("DELETE FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
+                    await interaction.response.send_message("Closing active ticket channel securely...")
+                    await dispatch_audit_log(interaction.guild, make_embed("Ticket Closed", f"Channel {interaction.channel.name} was successfully closed."))
                     await interaction.channel.delete()
 
-    @tasks.loop(seconds=10)
-    async def check_giveaways(self):
-        now = time.time()
-        ended_giveaways = await db.fetchall("SELECT message_id, channel_id, prize, winners FROM giveaways WHERE end_time <= ? AND ended = 0", (now,))
-        
-        for g in ended_giveaways:
-            msg_id, chan_id, prize, winners_cnt = g
-            await db.execute("UPDATE giveaways SET ended = 1 WHERE message_id = ?", (msg_id,))
-            channel = self.get_channel(chan_id)
-            if not channel:
+    @tasks.loop(seconds=15)
+    async def background_giveaway_loop(self):
+        """Background task loop checking and resolving active giveaways."""
+        current_ts = time.time()
+        pending = await db_controller.fetchall("SELECT message_id, channel_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", (current_ts,))
+        for row in pending:
+            m_id, c_id, prize = row
+            await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (m_id,))
+            target_chan = self.get_channel(c_id)
+            if not target_chan:
                 continue
             try:
-                msg = await channel.fetch_message(msg_id)
-                reaction = discord.utils.get(msg.reactions, emoji="🎉")
-                users = [u async for u in reaction.users() if not u.bot] if reaction else []
-
-                if not users:
-                    await channel.send(f"🎉 Giveaway for **{prize}** ended, but there were no valid entries!")
+                msg = await target_chan.fetch_message(m_id)
+                rxn = discord.utils.get(msg.reactions, emoji="🎉")
+                users_list = [u async for u in rxn.users() if not u.bot] if rxn else []
+                if not users_list:
+                    await target_chan.send(f"Giveaway for **{prize}** concluded with no valid participants.")
                 else:
-                    win_list = random.sample(users, min(len(users), winners_cnt))
-                    win_mentions = ", ".join([u.mention for u in win_list])
-                    await channel.send(f"🎉 Congratulations {win_mentions}! You won **{prize}**!")
+                    winner = random.choice(users_list)
+                    await target_chan.send(f"🎉 Winner selected: {winner.mention}! Congratulations, you won **{prize}**!")
             except Exception:
                 pass
 
-    @tasks.loop(seconds=30)
-    async def check_tempbans(self):
-        now = time.time()
-        expired = await db.fetchall("SELECT guild_id, user_id FROM tempbans WHERE unban_time <= ?", (now,))
+    @tasks.loop(seconds=40)
+    async def background_tempban_loop(self):
+        """Background task loop managing expiration of temporary user bans."""
+        current_ts = time.time()
+        expired = await db_controller.fetchall("SELECT guild_id, target_id FROM temporary_bans WHERE expiry_timestamp <= ?", (current_ts,))
         for g_id, u_id in expired:
-            await db.execute("DELETE FROM tempbans WHERE guild_id = ? AND user_id = ?", (g_id, u_id))
+            await db_controller.execute("DELETE FROM temporary_bans WHERE guild_id = ? AND target_id = ?", (g_id, u_id))
             guild = self.get_guild(g_id)
             if guild:
                 try:
-                    user = await self.fetch_user(u_id)
-                    await guild.unban(user, reason="Tempban expired")
-                    await send_log(guild, success_embed("Tempban Expired", f"User {user.name} (`{user.id}`) was automatically unbanned."))
+                    user_obj = await self.fetch_user(u_id)
+                    await guild.unban(user_obj, reason="Temporary ban period expired automatically")
+                    await dispatch_audit_log(guild, success_embed("Temporary Ban Lifted", f"User {user_obj} (`{user_obj.id}`) was unbanned automatically."))
                 except Exception:
                     pass
 
-bot = ModerationBot()
+bot_client = ExtendedBotClient()
 
-# ==========================================
-# CONFIG COMMAND FOR LOGS
-# ==========================================
-@bot.tree.command(name="set_logs", description="Set the channel where logs will be sent")
+# =====================================================================
+# CONFIGURATION COMMANDS
+# =====================================================================
+@bot_client.tree.command(name="set_log_channel", description="Configure server audit logging channel")
 @app_commands.checks.has_permissions(administrator=True)
-async def set_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-    await db.execute("INSERT INTO guild_settings (guild_id, log_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = ?",
-                     (interaction.guild_id, channel.id, channel.id))
-    await interaction.response.send_message(embed=success_embed("Logs Channel Set", f"Logs will now be sent to {channel.mention}."), ephemeral=True)
+async def set_log_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await db_controller.execute(
+        "INSERT INTO server_settings (guild_id, log_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = ?",
+        (interaction.guild_id, channel.id, channel.id)
+    )
+    await interaction.response.send_message(embed=success_embed("Configuration Updated", f"Audit logs will now be directed to {channel.mention}."), ephemeral=True)
 
-# ==========================================
-# MODERATOR COMMANDS
-# ==========================================
-@bot.tree.command(name="kick", description="Kicks a member from the server")
+@bot_client.tree.command(name="set_welcome", description="Configure automated welcome messages")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_welcome(interaction: discord.Interaction, channel: discord.TextChannel, message: str):
+    await db_controller.execute(
+        "INSERT INTO server_settings (guild_id, welcome_channel_id, welcome_message) VALUES (?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET welcome_channel_id = ?, welcome_message = ?",
+        (interaction.guild_id, channel.id, message, channel.id, message)
+    )
+    await interaction.response.send_message(embed=success_embed("Welcome Configured", f"Welcome messages enabled in {channel.mention}."), ephemeral=True)
+
+@bot_client.tree.command(name="set_automod", description="Toggle server automated moderation filtering")
+@app_commands.checks.has_permissions(administrator=True)
+async def set_automod(interaction: discord.Interaction, status: bool):
+    await db_controller.execute(
+        "INSERT INTO server_settings (guild_id, automod_status) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET automod_status = ?",
+        (interaction.guild_id, 1 if status else 0, 1 if status else 0)
+    )
+    await interaction.response.send_message(embed=success_embed("Automod Status", f"Automated moderation successfully set to **{status}**."), ephemeral=True)
+
+# =====================================================================
+# MODERATION SUITE
+# =====================================================================
+@bot_client.tree.command(name="kick_member", description="Kick a member from the server")
 @app_commands.checks.has_permissions(kick_members=True)
-async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+async def kick_member(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason specified"):
     try:
-        await user.send(embed=error_embed("Kicked", f"You have been kicked from **{interaction.guild.name}**.\n**Reason:** {reason}"))
+        await user.send(embed=error_embed("Notice", f"You were kicked from **{interaction.guild.name}**.\nReason: {reason}"))
     except Exception:
         pass
     await user.kick(reason=reason)
-    await send_log(interaction.guild, error_embed("MODERATOR COMMANDS", f"**Action:** Kick\n**User:** {user.mention} (`{user.id}`)\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
-    await interaction.response.send_message(embed=success_embed("Kicked", f"{user.mention} has been kicked.\n**Reason:** {reason}"))
+    await dispatch_audit_log(interaction.guild, error_embed("Mod Action: Kick", f"**Target:** {user.mention}\n**Staff:** {interaction.user.mention}\n**Reason:** {reason}"))
+    await interaction.response.send_message(embed=success_embed("Success", f"{user.mention} has been kicked successfully."))
 
-@bot.tree.command(name="ban", description="Bans a member from the server")
+@bot_client.tree.command(name="ban_member", description="Ban a member from the server")
 @app_commands.checks.has_permissions(ban_members=True)
-async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+async def ban_member(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason specified"):
     try:
-        await user.send(embed=error_embed("Banned", f"You have been banned from **{interaction.guild.name}**.\n**Reason:** {reason}"))
+        await user.send(embed=error_embed("Notice", f"You were banned from **{interaction.guild.name}**.\nReason: {reason}"))
     except Exception:
         pass
     await user.ban(reason=reason)
-    await send_log(interaction.guild, error_embed("MODERATOR COMMANDS", f"**Action:** Ban\n**User:** {user.mention} (`{user.id}`)\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
-    await interaction.response.send_message(embed=success_embed("Banned", f"{user.mention} has been banned.\n**Reason:** {reason}"))
+    await dispatch_audit_log(interaction.guild, error_embed("Mod Action: Ban", f"**Target:** {user.mention}\n**Staff:** {interaction.user.mention}\n**Reason:** {reason}"))
+    await interaction.response.send_message(embed=success_embed("Success", f"{user.mention} has been banned successfully."))
 
-@bot.tree.command(name="tempban", description="Temporarily ban a member for a duration in minutes")
+@bot_client.tree.command(name="temp_ban", description="Temporarily ban a user for specified minutes")
 @app_commands.checks.has_permissions(ban_members=True)
-async def tempban(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason provided"):
+async def temp_ban(interaction: discord.Interaction, user: discord.Member, duration_minutes: int, reason: str = "No reason specified"):
     try:
-        await user.send(embed=error_embed("Tempbanned", f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes} minutes**.\n**Reason:** {reason}"))
+        await user.send(embed=error_embed("Notice", f"Temporary ban from **{interaction.guild.name}** for {duration_minutes}m.\nReason: {reason}"))
     except Exception:
         pass
-    unban_time = time.time() + (minutes * 60)
-    await user.ban(reason=f"Tempban for {minutes}m: {reason}")
-    await db.execute("INSERT OR REPLACE INTO tempbans (guild_id, user_id, unban_time) VALUES (?, ?, ?)",
-                     (interaction.guild_id, user.id, unban_time))
-    await send_log(interaction.guild, error_embed("MODERATOR COMMANDS", f"**Action:** Tempban\n**User:** {user.mention} (`{user.id}`)\n**Duration:** {minutes} minutes\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
-    await interaction.response.send_message(embed=success_embed("Tempbanned", f"{user.mention} banned for {minutes} minutes.\n**Reason:** {reason}"))
+    expiry_ts = time.time() + (duration_minutes * 60)
+    await user.ban(reason=f"Temp ban {duration_minutes}m: {reason}")
+    await db_controller.execute(
+        "INSERT OR REPLACE INTO temporary_bans (guild_id, target_id, expiry_timestamp) VALUES (?, ?, ?)",
+        (interaction.guild_id, user.id, expiry_ts)
+    )
+    await dispatch_audit_log(interaction.guild, error_embed("Mod Action: Temp Ban", f"**Target:** {user.mention}\n**Duration:** {duration_minutes}m\n**Staff:** {interaction.user.mention}"))
+    await interaction.response.send_message(embed=success_embed("Success", f"{user.mention} has been temporarily banned for {duration_minutes} minutes."))
 
-@bot.tree.command(name="unban", description="Unban a user by User ID")
+@bot_client.tree.command(name="unban_user", description="Unban a user using their unique ID")
 @app_commands.checks.has_permissions(ban_members=True)
-async def unban(interaction: discord.Interaction, user_id: str, reason: str = "No reason provided"):
+async def unban_user(interaction: discord.Interaction, user_id: str, reason: str = "No reason specified"):
     try:
-        user = await bot.fetch_user(int(user_id))
-        await interaction.guild.unban(user, reason=reason)
-        await send_log(interaction.guild, success_embed("MODERATOR COMMANDS", f"**Action:** Unban\n**User:** {user.name} (`{user.id}`)\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
-        await interaction.response.send_message(embed=success_embed("Unbanned", f"{user.name} has been unbanned."))
-    except Exception as e:
-        await interaction.response.send_message(embed=error_embed("Error", f"Failed to unban user: {e}"), ephemeral=True)
+        target_usr = await bot_client.fetch_user(int(user_id))
+        await interaction.guild.unban(target_usr, reason=reason)
+        await dispatch_audit_log(interaction.guild, success_embed("Mod Action: Unban", f"**Target:** {target_usr}\n**Staff:** {interaction.user.mention}"))
+        await interaction.response.send_message(embed=success_embed("Success", f"Successfully unbanned user ID {user_id}."))
+    except Exception as err:
+        await interaction.response.send_message(embed=error_embed("Error", f"Could not execute unban: {err}"), ephemeral=True)
 
-@bot.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes")
+@bot_client.tree.command(name="timeout_member", description="Timeout a user for a set time duration")
 @app_commands.checks.has_permissions(moderate_members=True)
-async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason provided"):
+async def timeout_member(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason specified"):
     try:
-        await user.send(embed=error_embed("Timeout", f"You have been timed out in **{interaction.guild.name}** for **{minutes} minutes**.\n**Reason:** {reason}"))
+        await user.send(embed=error_embed("Notice", f"You have been timed out in **{interaction.guild.name}** for {minutes}m."))
     except Exception:
         pass
-    duration = datetime.timedelta(minutes=minutes)
-    await user.timeout(duration, reason=reason)
-    await send_log(interaction.guild, warning_embed("MODERATOR COMMANDS", f"**Action:** Timeout\n**User:** {user.mention} (`{user.id}`)\n**Duration:** {minutes} minutes\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
-    await interaction.response.send_message(embed=success_embed("Timeout", f"{user.mention} has been timed out for {minutes} minutes."))
+    span = datetime.timedelta(minutes=minutes)
+    await user.timeout(span, reason=reason)
+    await dispatch_audit_log(interaction.guild, warning_embed("Mod Action: Timeout", f"**Target:** {user.mention}\n**Duration:** {minutes}m\n**Staff:** {interaction.user.mention}"))
+    await interaction.response.send_message(embed=success_embed("Success", f"{user.mention} timed out for {minutes} minutes."))
 
-@bot.tree.command(name="untimeout", description="Remove timeout from a member")
-@app_commands.checks.has_permissions(moderate_members=True)
-async def untimeout(interaction: discord.Interaction, user: discord.Member):
-    await user.timeout(None)
-    await send_log(interaction.guild, success_embed("MODERATOR COMMANDS", f"**Action:** Untimeout\n**User:** {user.mention}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Timeout for {user.mention} has been removed."))
-
-@bot.tree.command(name="mute", description="Mute a member using a Muted role")
-@app_commands.checks.has_permissions(manage_roles=True)
-async def mute(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
-    try:
-        await user.send(embed=error_embed("Muted", f"You have been muted in **{interaction.guild.name}**.\n**Reason:** {reason}"))
-    except Exception:
-        pass
-    guild = interaction.guild
-    row = await db.fetchone("SELECT muted_role_id FROM guild_settings WHERE guild_id = ?", (guild.id,))
-    role = guild.get_role(row[0]) if row and row[0] else None
-
-    if not role:
-        role = discord.utils.get(guild.roles, name="Muted")
-        if not role:
-            role = await guild.create_role(name="Muted")
-            for channel in guild.channels:
-                await channel.set_permissions(role, send_messages=False, speak=False)
-            await db.execute("INSERT INTO guild_settings (guild_id, muted_role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET muted_role_id = ?",
-                             (guild.id, role.id, role.id))
-
-    await user.add_roles(role, reason=reason)
-    await send_log(interaction.guild, warning_embed("MODERATOR COMMANDS", f"**Action:** Mute\n**User:** {user.mention} (`{user.id}`)\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
-    await interaction.response.send_message(embed=success_embed("Muted", f"{user.mention} has been muted.\n**Reason:** {reason}"))
-
-@bot.tree.command(name="unmute", description="Unmute a member")
-@app_commands.checks.has_permissions(manage_roles=True)
-async def unmute(interaction: discord.Interaction, user: discord.Member):
-    guild = interaction.guild
-    row = await db.fetchone("SELECT muted_role_id FROM guild_settings WHERE guild_id = ?", (guild.id,))
-    role = guild.get_role(row[0]) if row and row[0] else discord.utils.get(guild.roles, name="Muted")
-
-    if role in user.roles:
-        await user.remove_roles(role)
-        await send_log(interaction.guild, success_embed("MODERATOR COMMANDS", f"**Action:** Unmute\n**User:** {user.mention}\n**Moderator:** {interaction.user.mention}"))
-        await interaction.response.send_message(embed=success_embed("Unmuted", f"{user.mention} has been unmuted."))
-    else:
-        await interaction.response.send_message(embed=error_embed("Error", f"{user.mention} is not muted!"), ephemeral=True)
-
-@bot.tree.command(name="warn", description="Issue a warning to a member")
+@bot_client.tree.command(name="warn_member", description="Record a formal warning for a member")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+async def warn_member(interaction: discord.Interaction, user: discord.Member, reason: str):
     try:
-        await user.send(embed=warning_embed("Warning", f"You have received a warning in **{interaction.guild.name}**.\n**Reason:** {reason}"))
+        await user.send(embed=warning_embed("Warning Logged", f"You received a warning in **{interaction.guild.name}**.\nReason: {reason}"))
     except Exception:
         pass
-    await db.execute("INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
-                     (interaction.guild_id, user.id, interaction.user.id, reason))
-    await send_log(interaction.guild, warning_embed("MODERATOR COMMANDS", f"**Action:** Warn\n**User:** {user.mention} (`{user.id}`)\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
-    await interaction.response.send_message(embed=warning_embed("Warning Issued", f"{user.mention} has been WARNED.\n**Reason:** {reason}"))
+    await db_controller.execute(
+        "INSERT INTO warning_records (guild_id, target_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
+        (interaction.guild_id, user.id, interaction.user.id, reason)
+    )
+    await dispatch_audit_log(interaction.guild, warning_embed("Mod Action: Warning", f"**Target:** {user.mention}\n**Staff:** {interaction.user.mention}\n**Reason:** {reason}"))
+    await interaction.response.send_message(embed=warning_embed("Warning Issued", f"{user.mention} has been warned successfully."))
 
-@bot.tree.command(name="warnings", description="View warnings history for a member")
-async def warnings(interaction: discord.Interaction, user: discord.Member):
-    rows = await db.fetchall("SELECT id, reason, timestamp FROM warnings WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, user.id))
+@bot_client.tree.command(name="check_warnings", description="View logged warnings for a member")
+async def check_warnings(interaction: discord.Interaction, user: discord.Member):
+    records = await db_controller.fetchall("SELECT id, reason FROM warning_records WHERE guild_id = ? AND target_id = ?", (interaction.guild_id, user.id))
+    if not records:
+        return await interaction.response.send_message(embed=success_embed("Warnings", f"{user.mention} has a clean record."), ephemeral=True)
+    body_text = "\n".join([f"`#{item[0]}` - {item[1]}" for item in records])
+    await interaction.response.send_message(embed=make_embed(f"Warnings for {user.name}", body_text))
+
+@bot_client.tree.command(name="add_note", description="Add an internal staff note regarding a member")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def add_note(interaction: discord.Interaction, user: discord.Member, note: str):
+    await db_controller.execute(
+        "INSERT INTO user_notes (guild_id, target_id, author_id, note_content) VALUES (?, ?, ?, ?)",
+        (interaction.guild_id, user.id, interaction.user.id, note)
+    )
+    await interaction.response.send_message(embed=success_embed("Note Saved", f"Internal note recorded for {user.mention}."), ephemeral=True)
+
+@bot_client.tree.command(name="view_notes", description="View internal staff notes for a member")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def view_notes(interaction: discord.Interaction, user: discord.Member):
+    notes = await db_controller.fetchall("SELECT id, author_id, note_content, timestamp FROM user_notes WHERE guild_id = ? AND target_id = ?", (interaction.guild_id, user.id))
+    if not notes:
+        return await interaction.response.send_message(embed=info_embed("Staff Notes", f"No notes found for {user.mention}."), ephemeral=True)
+    
+    packet = make_embed(f"Staff Notes — {user.name}", f"Internal moderation logs.")
+    for n_id, a_id, content, ts in notes:
+        packet.add_field(name=f"Note #{n_id} (Author: <@{a_id}>)", value=f"{content}\n*Timestamp: {ts}*", inline=False)
+    await interaction.response.send_message(embed=packet, ephemeral=True)
+
+# =====================================================================
+# ECONOMY SUITE
+# =====================================================================
+economy_hub = app_commands.Group(name="economy", description="Community financial ecosystem commands")
+
+@economy_hub.command(name="balance", description="Check your current wallet and bank balance")
+async def eco_balance(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    target = user or interaction.user
+    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, target.id))
+    wallet = res[0] if res else 0
+    bank = res[1] if res else 0
+
+    packet = make_embed(f"Financial Balance — {target.name}", f"Overview of financial assets.")
+    packet.add_field(name="Wallet", value=f"🪙 {wallet:,} credits", inline=True)
+    packet.add_field(name="Bank", value=f"🏦 {bank:,} credits", inline=True)
+    await interaction.response.send_message(embed=packet)
+
+@economy_hub.command(name="deposit", description="Deposit cash from wallet into bank account")
+async def eco_deposit(interaction: discord.Interaction, amount: int):
+    if amount <= 0:
+        return await interaction.response.send_message(embed=error_embed("Error", "Amount must be greater than zero."), ephemeral=True)
+    
+    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, interaction.user.id))
+    wallet = res[0] if res else 0
+    bank = res[1] if res else 0
+
+    if wallet < amount:
+        return await interaction.response.send_message(embed=error_embed("Error", "You do not have enough funds in your wallet."), ephemeral=True)
+
+    await db_controller.execute(
+        "INSERT OR REPLACE INTO economy_balances (guild_id, user_id, wallet, bank) VALUES (?, ?, ?, ?)",
+        (interaction.guild_id, interaction.user.id, wallet - amount, bank + amount)
+    )
+    await interaction.response.send_message(embed=success_embed("Deposit Successful", f"Deposited **{amount:,}** credits into your bank account."))
+
+@economy_hub.command(name="withdraw", description="Withdraw currency from bank account to wallet")
+async def eco_withdraw(interaction: discord.Interaction, amount: int):
+    if amount <= 0:
+        return await interaction.response.send_message(embed=error_embed("Error", "Amount must be greater than zero."), ephemeral=True)
+    
+    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, interaction.user.id))
+    wallet = res[0] if res else 0
+    bank = res[1] if res else 0
+
+    if bank < amount:
+        return await interaction.response.send_message(embed=error_embed("Error", "You do not have enough funds in your bank account."), ephemeral=True)
+
+    await db_controller.execute(
+        "INSERT OR REPLACE INTO economy_balances (guild_id, user_id, wallet, bank) VALUES (?, ?, ?, ?)",
+        (interaction.guild_id, interaction.user.id, wallet + amount, bank - amount)
+    )
+    await interaction.response.send_message(embed=success_embed("Withdrawal Successful", f"Withdrew **{amount:,}** credits into your wallet."))
+
+@economy_hub.command(name="work", description="Perform professional labor to earn currency")
+async def eco_work(interaction: discord.Interaction):
+    earnings = random.randint(100, 350)
+    res = await db_controller.fetchone("SELECT wallet, bank FROM economy_balances WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, interaction.user.id))
+    wallet = res[0] if res else 0
+    bank = res[1] if res else 0
+
+    await db_controller.execute(
+        "INSERT OR REPLACE INTO economy_balances (guild_id, user_id, wallet, bank) VALUES (?, ?, ?, ?)",
+        (interaction.guild_id, interaction.user.id, wallet + earnings, bank)
+    )
+    jobs = ["software developer", "community moderator", "graphic designer", "server administrator", "content creator"]
+    job_title = random.choice(jobs)
+    await interaction.response.send_message(embed=success_embed("Shift Completed", f"You worked as a **{job_title}** and earned **{earnings:,}** credits!"))
+
+bot_client.tree.add_command(economy_hub)
+
+# =====================================================================
+# REPUTATION / VOUCH SYSTEM
+# =====================================================================
+vouch_hub = app_commands.Group(name="vouch", description="Community reputation and voucher framework")
+
+@vouch_hub.command(name="give", description="Leave a reputation vouch for another user")
+@app_commands.describe(user="The user you are vouching for", comment="Details regarding the interaction")
+async def vouch_give(interaction: discord.Interaction, user: discord.Member, comment: Optional[str] = "No additional details"):
+    if user.id == interaction.user.id:
+        return await interaction.response.send_message(embed=error_embed("Error", "You cannot submit a vouch for yourself."), ephemeral=True)
+    
+    await db_controller.execute(
+        "INSERT INTO vouch_records (guild_id, recipient_id, author_id, comment) VALUES (?, ?, ?, ?)",
+        (interaction.guild_id, user.id, interaction.user.id, comment)
+    )
+    
+    res = await db_controller.fetchone("SELECT COUNT(*) FROM vouch_records WHERE guild_id = ? AND recipient_id = ?", (interaction.guild_id, user.id))
+    total_score = res[0] if res else 1
+
+    packet = success_embed("Vouch Recorded", f"⭐ {interaction.user.mention} submitted a vouch for {user.mention}! Total vouches: **{total_score}**")
+    if comment != "No additional details":
+        packet.add_field(name="Comment", value=comment, inline=False)
+
+    await interaction.response.send_message(embed=packet)
+    await dispatch_audit_log(interaction.guild, make_embed("Reputation Log", f"**Author:** {interaction.user.mention}\n**Recipient:** {user.mention}\n**Total Vouches:** `{total_score}`\n**Note:** {comment}"))
+
+@vouch_hub.command(name="leaderboard", description="Display community reputation leaderboard")
+async def vouch_leaderboard(interaction: discord.Interaction):
+    rows = await db_controller.fetchall("SELECT recipient_id, COUNT(*) as tally FROM vouch_records WHERE guild_id = ? GROUP BY recipient_id ORDER BY tally DESC LIMIT 10", (interaction.guild_id,))
     if not rows:
-        return await interaction.response.send_message(embed=success_embed("Warnings", f"{user.mention} has no warnings."), ephemeral=True)
-    desc = "\n".join([f"`#{r[0]}` | **Reason:** {r[1]}" for r in rows])
-    await interaction.response.send_message(embed=create_embed(f"Warnings for {user.name}", desc))
+        return await interaction.response.send_message(embed=error_embed("Leaderboard", "No reputation points logged in this server yet."), ephemeral=True)
+    
+    lines = []
+    medals = ["👑", "🥈", "🥉"]
+    for idx, (usr_id, count) in enumerate(rows):
+        rank_tag = medals[idx] if idx < 3 else f"`{idx + 1}.`"
+        lines.append(f"{rank_tag} <@{usr_id}> — **{count}** vouches")
 
-@bot.tree.command(name="purge", description="Purge a specified number of messages")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def purge(interaction: discord.Interaction, amount: int):
-    deleted = await interaction.channel.purge(limit=amount)
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Purge\n**Channel:** {interaction.channel.mention}\n**Amount:** {len(deleted)}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Purge", f"Deleted {len(deleted)} messages."), ephemeral=True)
+    await interaction.response.send_message(embed=make_embed("🏆 Vouch Leaderboard", "\n".join(lines)))
 
-@bot.tree.command(name="lock", description="Lock the current channel")
-@app_commands.checks.has_permissions(manage_channels=True)
-async def lock(interaction: discord.Interaction):
-    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
-    await send_log(interaction.guild, warning_embed("MODERATOR COMMANDS", f"**Action:** Lock\n**Channel:** {interaction.channel.mention}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Channel Locked", "Members can no longer send messages in this channel."))
+bot_client.tree.add_command(vouch_hub)
 
-@bot.tree.command(name="unlock", description="Unlock the current channel")
-@app_commands.checks.has_permissions(manage_channels=True)
-async def unlock(interaction: discord.Interaction):
-    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
-    await send_log(interaction.guild, success_embed("MODERATOR COMMANDS", f"**Action:** Unlock\n**Channel:** {interaction.channel.mention}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Channel Unlocked", "Members can send messages again."))
+# =====================================================================
+# UTILITY & FUN COMMANDS
+# =====================================================================
+@bot_client.tree.command(name="afk", description="Set your status to AFK with an optional reason")
+async def afk_command(interaction: discord.Interaction, reason: str = "Away from keyboard"):
+    afk_users[interaction.user.id] = reason
+    await interaction.response.send_message(embed=success_embed("AFK Status Enabled", f"{interaction.user.mention}, you are now marked as AFK: `{reason}`"))
 
-@bot.tree.command(name="lockdown", description="Lockdown all channels in the server")
-@app_commands.checks.has_permissions(administrator=True)
-async def lockdown(interaction: discord.Interaction):
-    await interaction.response.defer()
-    for channel in interaction.guild.text_channels:
-        await channel.set_permissions(interaction.guild.default_role, send_messages=False)
-    await send_log(interaction.guild, error_embed("MODERATOR COMMANDS", f"**Action:** Lockdown\n**Moderator:** {interaction.user.mention}"))
-    await interaction.followup.send(embed=success_embed("Server Lockdown", "All text channels have been locked!"))
-
-@bot.tree.command(name="slowmode", description="Set channel slowmode in seconds (0 to disable)")
-@app_commands.checks.has_permissions(manage_channels=True)
-async def slowmode(interaction: discord.Interaction, seconds: int):
-    await interaction.channel.edit(slowmode_delay=seconds)
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Slowmode\n**Channel:** {interaction.channel.mention}\n**Delay:** {seconds}s\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Slowmode", f"Slowmode set to {seconds} seconds."))
-
-@bot.tree.command(name="nickname", description="Change a member's nickname")
-@app_commands.checks.has_permissions(manage_nicknames=True)
-async def nickname(interaction: discord.Interaction, user: discord.Member, new_nickname: Optional[str] = None):
-    await user.edit(nick=new_nickname)
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Nickname\n**User:** {user.mention}\n**New Nick:** {new_nickname or 'None'}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Nickname Changed", f"Updated nickname for {user.mention}."))
-
-@bot.tree.command(name="role_add", description="Add a role to a member")
-@app_commands.checks.has_permissions(manage_roles=True)
-async def role_add(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
-    await user.add_roles(role)
-    await send_log(interaction.guild, success_embed("MODERATOR COMMANDS", f"**Action:** Role Add\n**User:** {user.mention}\n**Role:** {role.mention}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Role Added", f"Added {role.mention} to {user.mention}."))
-
-@bot.tree.command(name="role_remove", description="Remove a role from a member")
-@app_commands.checks.has_permissions(manage_roles=True)
-async def role_remove(interaction: discord.Interaction, user: discord.Member, role: discord.Role):
-    await user.remove_roles(role)
-    await send_log(interaction.guild, warning_embed("MODERATOR COMMANDS", f"**Action:** Role Remove\n**User:** {user.mention}\n**Role:** {role.mention}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Role Removed", f"Removed {role.mention} from {user.mention}."))
-
-# ==========================================
-# INFO COMMANDS
-# ==========================================
-@bot.tree.command(name="userinfo", description="Get information about a user")
-async def userinfo(interaction: discord.Interaction, user: discord.Member = None):
-    user = user or interaction.user
-    embed = create_embed(f"User Info - {user.name}", f"ID: `{user.id}`")
-    embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="Account Created", value=f"<t:{int(user.created_at.timestamp())}:D>", inline=True)
-    embed.add_field(name="Joined Server", value=f"<t:{int(user.joined_at.timestamp())}:D>", inline=True)
-    embed.add_field(name="Roles", value=f"{len(user.roles) - 1}", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="serverinfo", description="Get information about this server")
-async def serverinfo(interaction: discord.Interaction):
-    guild = interaction.guild
-    embed = create_embed(f"Server Info - {guild.name}", f"ID: `{guild.id}`")
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
-    embed.add_field(name="Owner", value=f"<@{guild.owner_id}>", inline=True)
-    embed.add_field(name="Members", value=f"{guild.member_count}", inline=True)
-    embed.add_field(name="Channels", value=f"{len(guild.channels)}", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="channelinfo", description="Get information about a channel")
-async def channelinfo(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    channel = channel or interaction.channel
-    embed = create_embed(f"Channel Info - #{channel.name}", f"ID: `{channel.id}`")
-    embed.add_field(name="Category", value=channel.category.name if channel.category else "None", inline=True)
-    embed.add_field(name="Created At", value=f"<t:{int(channel.created_at.timestamp())}:D>", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="roleinfo", description="Get information about a role")
-async def roleinfo(interaction: discord.Interaction, role: discord.Role):
-    embed = create_embed(f"Role Info - {role.name}", f"ID: `{role.id}`", color=role.color.value or COLOR_PRIMARY)
-    embed.add_field(name="Color", value=str(role.color), inline=True)
-    embed.add_field(name="Members Count", value=str(len(role.members)), inline=True)
-    embed.add_field(name="Hoisted", value=str(role.hoist), inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="avatar", description="Display a user's avatar")
-async def avatar(interaction: discord.Interaction, user: discord.Member = None):
-    user = user or interaction.user
-    embed = create_embed(f"{user.name}'s Avatar", "")
-    embed.set_image(url=user.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="banner", description="Display a user's banner")
-async def banner(interaction: discord.Interaction, user: discord.User = None):
-    user = user or interaction.user
-    fetched_user = await bot.fetch_user(user.id)
-    if fetched_user.banner:
-        embed = create_embed(f"{fetched_user.name}'s Banner", "")
-        embed.set_image(url=fetched_user.banner.url)
-        await interaction.response.send_message(embed=embed)
-    else:
-        await interaction.response.send_message(embed=error_embed("No Banner", f"{fetched_user.name} does not have a banner set."), ephemeral=True)
-
-@bot.tree.command(name="botinfo", description="Display information about the bot")
-async def botinfo(interaction: discord.Interaction):
-    embed = create_embed("Bot Information", f"Logged in as **{bot.user.name}**\nServing **{len(bot.guilds)}** server(s).")
-    embed.add_field(name="Library", value="discord.py 2.x", inline=True)
-    embed.add_field(name="Developer", value="SPRITEGG", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-# ==========================================
-# GIVEAWAYS, TICKETS & EXTRA UTILITIES
-# ==========================================
-@bot.tree.command(name="giveaway", description="Start a giveaway")
-@app_commands.checks.has_permissions(manage_events=True)
-async def start_giveaway(interaction: discord.Interaction, duration_minutes: int, winners: int, prize: str):
-    end_time = time.time() + (duration_minutes * 60)
-    embed = create_embed(f"🎉 GIVEAWAY: {prize}", f"React with 🎉 to enter!\n**Winners:** {winners}\n**Ends:** <t:{int(end_time)}:R>")
-    await interaction.response.send_message(embed=embed)
-    msg = await interaction.original_response()
-    await msg.add_reaction("🎉")
-    await db.execute("INSERT INTO giveaways (message_id, channel_id, guild_id, prize, end_time, winners) VALUES (?, ?, ?, ?, ?, ?)",
-                     (msg.id, interaction.channel_id, interaction.guild_id, prize, end_time, winners))
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Giveaway Start\n**Prize:** {prize}\n**Duration:** {duration_minutes}m\n**Moderator:** {interaction.user.mention}"))
-
-@bot.tree.command(name="giveaway_reroll", description="Reroll a giveaway winner")
-@app_commands.checks.has_permissions(manage_events=True)
-async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
-    try:
-        msg = await interaction.channel.fetch_message(int(message_id))
-        reaction = discord.utils.get(msg.reactions, emoji="🎉")
-        users = [u async for u in reaction.users() if not u.bot] if reaction else []
-        if users:
-            winner = random.choice(users)
-            await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Giveaway Reroll\n**Winner:** {winner.mention}\n**Moderator:** {interaction.user.mention}"))
-            await interaction.response.send_message(f"🎉 New Winner: {winner.mention}!")
-        else:
-            await interaction.response.send_message(embed=error_embed("Reroll Failed", "No valid entries found."), ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(embed=error_embed("Error", f"Could not fetch message: {e}"), ephemeral=True)
-
-@bot.tree.command(name="giveaway_edit", description="Edit an ongoing giveaway duration")
-@app_commands.checks.has_permissions(manage_events=True)
-async def giveaway_edit(interaction: discord.Interaction, message_id: str, new_duration_minutes: int):
-    new_end = time.time() + (new_duration_minutes * 60)
-    await db.execute("UPDATE giveaways SET end_time = ? WHERE message_id = ?", (new_end, int(message_id)))
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Giveaway Edit\n**Giveaway ID:** `{message_id}`\n**New Duration:** {new_duration_minutes}m"))
-    await interaction.response.send_message(embed=success_embed("Giveaway Updated", f"New end time set for giveaway `{message_id}`."))
-
-@bot.tree.command(name="setup_tickets", description="Create the ticket panel in this channel")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup_tickets(interaction: discord.Interaction, category: discord.CategoryChannel = None):
-    if category:
-        await db.execute("INSERT INTO ticket_configs (guild_id, category_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET category_id = ?",
-                         (interaction.guild_id, category.id, category.id))
-    await interaction.channel.send(embed=create_embed("Support Tickets", "Click the button below to open a ticket."), view=TicketView())
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Setup Tickets\n**Channel:** {interaction.channel.mention}"))
-    await interaction.response.send_message(embed=success_embed("Tickets", "Ticket panel successfully created."), ephemeral=True)
-
-@bot.tree.command(name="add_reaction_role", description="Add a reaction role to a message")
-@app_commands.checks.has_permissions(manage_roles=True)
-async def add_reaction_role(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
-    try:
-        msg = await interaction.channel.fetch_message(int(message_id))
-        await msg.add_reaction(emoji)
-        await db.execute("INSERT OR REPLACE INTO reaction_roles (message_id, emoji, role_id) VALUES (?, ?, ?)",
-                         (msg.id, emoji, role.id))
-        await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Add Reaction Role\n**Role:** {role.mention}\n**Emoji:** {emoji}\n**Message ID:** `{msg.id}`"))
-        await interaction.response.send_message(embed=success_embed("Reaction Role", f"Bound {emoji} to {role.mention} on message `{msg.id}`."), ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(embed=error_embed("Error", f"Failed: {e}"), ephemeral=True)
-
-@bot.tree.command(name="sticky", description="Set a sticky message for this channel")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def sticky(interaction: discord.Interaction, message: str):
-    sticky_messages[interaction.channel_id] = {"message": message, "last_msg_id": None}
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Sticky Message\n**Channel:** {interaction.channel.mention}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("Sticky Message", "Sticky message set for this channel."))
-
-@bot.tree.command(name="poll", description="Create a poll")
-async def poll(interaction: discord.Interaction, question: str):
-    embed = create_embed("📊 Poll", question)
-    await interaction.response.send_message(embed=embed)
+@bot_client.tree.command(name="poll", description="Create a simple interactive community poll")
+async def poll_command(interaction: discord.Interaction, question: str):
+    packet = make_embed("📊 Community Poll", f"**Question:** {question}\n\nReact with 👍 or 👎 below to cast your vote!")
+    await interaction.response.send_message(embed=packet)
     msg = await interaction.original_response()
     await msg.add_reaction("👍")
     await msg.add_reaction("👎")
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Poll Created\n**Question:** {question}\n**Creator:** {interaction.user.mention}"))
 
-@bot.tree.command(name="embed_builder", description="Create a custom embed message")
+@bot_client.tree.command(name="purge_messages", description="Purge chat messages from channel")
 @app_commands.checks.has_permissions(manage_messages=True)
-async def embed_builder(interaction: discord.Interaction, title: str, description: str, color_hex: Optional[str] = "5865F2"):
-    try:
-        color_val = int(color_hex.lstrip('#'), 16)
-    except ValueError:
-        color_val = COLOR_PRIMARY
-    embed = create_embed(title, description, color=color_val)
-    await interaction.channel.send(embed=embed)
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** Embed Builder\n**Title:** {title}\n**Channel:** {interaction.channel.mention}"))
-    await interaction.response.send_message(embed=success_embed("Embed Created", "Custom embed posted successfully!"), ephemeral=True)
+async def purge_messages(interaction: discord.Interaction, count: int):
+    purged = await interaction.channel.purge(limit=count)
+    await dispatch_audit_log(interaction.guild, make_embed("Mod Action: Purge", f"**Channel:** {interaction.channel.mention}\n**Count:** {len(purged)}\n**Staff:** {interaction.user.mention}", COLOR_WARNING))
+    await interaction.response.send_message(embed=success_embed("Purge Complete", f"Successfully cleared {len(purged)} messages."), ephemeral=True)
 
-@bot.tree.command(name="automod", description="Enable or disable AutoMod")
-@app_commands.checks.has_permissions(administrator=True)
-async def automod_toggle(interaction: discord.Interaction, enabled: bool):
-    await db.execute("INSERT INTO guild_settings (guild_id, automod_enabled) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET automod_enabled = ?",
-                     (interaction.guild_id, enabled, enabled))
-    status = "enabled" if enabled else "disabled"
-    await send_log(interaction.guild, create_embed("MODERATOR COMMANDS", f"**Action:** AutoMod Toggle\n**Status:** {status}\n**Moderator:** {interaction.user.mention}"))
-    await interaction.response.send_message(embed=success_embed("AutoMod", f"AutoMod is now **{status}**."))
+@bot_client.tree.command(name="lock_channel", description="Lock text channel sending permissions")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def lock_channel(interaction: discord.Interaction):
+    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
+    await dispatch_audit_log(interaction.guild, warning_embed("Mod Action: Lock", f"**Channel:** {interaction.channel.mention}\n**Staff:** {interaction.user.mention}"))
+    await interaction.response.send_message(embed=success_embed("Locked", "Channel message sending permissions locked."))
 
-# ==========================================
-# WEB SERVER (KEEP-ALIVE FOR RENDER)
-# ==========================================
+@bot_client.tree.command(name="unlock_channel", description="Restore text channel sending permissions")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def unlock_channel(interaction: discord.Interaction):
+    await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
+    await dispatch_audit_log(interaction.guild, success_embed("Mod Action: Unlock", f"**Channel:** {interaction.channel.mention}\n**Staff:** {interaction.user.mention}"))
+    await interaction.response.send_message(embed=success_embed("Unlocked", "Channel message sending permissions restored."))
+
+# =====================================================================
+# INFO SUITE
+# =====================================================================
+@bot_client.tree.command(name="user_profile", description="View user profile details and statistics")
+async def user_profile(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    packet = make_embed(f"User Profile — {target.name}", f"Detailed identifier overview.")
+    if target.display_avatar:
+        packet.set_thumbnail(url=target.display_avatar.url)
+    packet.add_field(name="Account Created", value=f"<t:{int(target.created_at.timestamp())}:D>", inline=True)
+    packet.add_field(name="Joined Server", value=f"<t:{int(target.joined_at.timestamp())}:D>", inline=True)
+    packet.add_field(name="Total Roles", value=f"{len(target.roles) - 1}", inline=True)
+    await interaction.response.send_message(embed=packet)
+
+@bot_client.tree.command(name="server_overview", description="View community server statistics")
+async def server_overview(interaction: discord.Interaction):
+    server = interaction.guild
+    packet = make_embed(f"Community Overview — {server.name}", f"Infrastructure status report.")
+    if server.icon:
+        packet.set_thumbnail(url=server.icon.url)
+    packet.add_field(name="Server Owner", value=f"<@{server.owner_id}>", inline=True)
+    packet.add_field(name="Member Count", value=f"{server.member_count}", inline=True)
+    packet.add_field(name="Channel Count", value=f"{len(server.channels)}", inline=True)
+    await interaction.response.send_message(embed=packet)
+
+# =====================================================================
+# WEB SERVICE (RENDER KEEP-ALIVE)
+# =====================================================================
 async def handle_ping(request):
-    return web.Response(text="Bot is online and active!")
+    return web.Response(text="Bot web service is live and fully responsive.")
 
 async def start_web_server():
     app = web.Application()
-    app.router.add_get('/', handle_ping)
+    app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
     await site.start()
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# =====================================================================
+# MAIN ROUTINE ENTRY POINT
+# =====================================================================
 async def main():
-    if not DISCORD_TOKEN:
-        raise ValueError("DISCORD_TOKEN environment variable is missing!")
+    if not BOT_TOKEN:
+        raise ValueError("DISCORD_TOKEN environment variable is required!")
 
     await start_web_server()
-    await bot.start(DISCORD_TOKEN)
+    await bot_client.start(BOT_TOKEN)
 
 if __name__ == "__main__":
     asyncio.run(main())
