@@ -16,16 +16,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==========================================
-# CONFIGURATIE
+# CONFIGURATION
 # ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_data.db")
 PORT = int(os.getenv("PORT", 8080))
 
 COLOR_PRIMARY = 0x5865F2    # Blurple
-COLOR_SUCCESS = 0x57F287    # Groen
-COLOR_WARNING = 0xFEE75C    # Geel
-COLOR_ERROR = 0xED4245      # Rood
+COLOR_SUCCESS = 0x57F287    # Green
+COLOR_WARNING = 0xFEE75C    # Yellow
+COLOR_ERROR = 0xED4245      # Red
 
 # ==========================================
 # EMBED HELPERS
@@ -43,7 +43,7 @@ def warning_embed(title: str, description: str) -> discord.Embed:
     return create_embed(f"⚠️ {title}", description, COLOR_WARNING)
 
 # ==========================================
-# DATABASE BEHEER
+# DATABASE MANAGEMENT
 # ==========================================
 class Database:
     def __init__(self, db_path: str = DATABASE_PATH):
@@ -141,11 +141,11 @@ class TicketView(discord.ui.View):
                          (channel.id, guild.id, interaction.user.id))
 
         close_view = discord.ui.View(timeout=None)
-        close_btn = discord.ui.Button(label="🔒 Sluit Ticket", style=discord.ButtonStyle.danger, custom_id="persistent_close_ticket")
+        close_btn = discord.ui.Button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="persistent_close_ticket")
         close_view.add_item(close_btn)
 
-        await channel.send(embed=create_embed("Ticket Geopend", f"Welkom {interaction.user.mention}! Beschrijf je vraag of probleem."), view=close_view)
-        await interaction.response.send_message(content=f"Ticket aangemaakt in {channel.mention}!", ephemeral=True)
+        await channel.send(embed=create_embed("Ticket Created", f"Welcome {interaction.user.mention}! Please describe your issue or question."), view=close_view)
+        await interaction.response.send_message(content=f"Ticket created in {channel.mention}!", ephemeral=True)
 
 # ==========================================
 # MAIN BOT CLASS
@@ -165,8 +165,8 @@ class ModerationBot(commands.Bot):
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f'Bot is online! Ingelogd als: {self.user.name} (ID: {self.user.id})')
-        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over de server"))
+        print(f'Bot is online! Logged in as: {self.user.name} (ID: {self.user.id})')
+        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over the server"))
 
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -177,11 +177,11 @@ class ModerationBot(commands.Bot):
         if row and row[0] and not message.author.guild_permissions.manage_messages:
             if self.invite_regex.search(message.content):
                 await message.delete()
-                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, uitnodigingen plaatsen is niet toegestaan!"), delete_after=5)
+                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, posting invite links is not allowed!"), delete_after=5)
 
             if len(message.content) > 10 and sum(1 for c in message.content if c.isupper()) / len(message.content) > 0.7:
                 await message.delete()
-                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, niet zo schreeuwen (te veel hoofdletters)!"), delete_after=5)
+                return await message.channel.send(embed=warning_embed("AutoMod", f"{message.author.mention}, please avoid excessive caps!"), delete_after=5)
 
     async def on_interaction(self, interaction: discord.Interaction):
         if interaction.type == discord.InteractionType.component:
@@ -190,7 +190,7 @@ class ModerationBot(commands.Bot):
                 row = await db.fetchone("SELECT user_id FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
                 if row:
                     await db.execute("DELETE FROM active_tickets WHERE channel_id = ?", (interaction.channel_id,))
-                    await interaction.response.send_message("Ticket wordt gesloten...")
+                    await interaction.response.send_message("Closing ticket...")
                     await interaction.channel.delete()
 
     @tasks.loop(seconds=10)
@@ -210,11 +210,11 @@ class ModerationBot(commands.Bot):
                 users = [u async for u in reaction.users() if not u.bot] if reaction else []
 
                 if not users:
-                    await channel.send(f"🎉 Giveaway voor **{prize}** is afgelopen, maar er waren geen deelnemers!")
+                    await channel.send(f"🎉 Giveaway for **{prize}** ended, but there were no valid entries!")
                 else:
                     win_list = random.sample(users, min(len(users), winners_cnt))
                     win_mentions = ", ".join([u.mention for u in win_list])
-                    await channel.send(f"🎉 Gefeliciteerd {win_mentions}! Je hebt **{prize}** gewonnen!")
+                    await channel.send(f"🎉 Congratulations {win_mentions}! You won **{prize}**!")
             except Exception:
                 pass
 
@@ -223,104 +223,104 @@ bot = ModerationBot()
 # ==========================================
 # SLASH COMMANDS
 # ==========================================
-@bot.tree.command(name="kick", description="Kopt een lid de server uit")
+@bot.tree.command(name="kick", description="Kicks a member from the server")
 @app_commands.checks.has_permissions(kick_members=True)
-async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "Geen reden opgegeven"):
+async def kick(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
     await user.kick(reason=reason)
-    await interaction.response.send_message(embed=success_embed("Kicked", f"{user.mention} is gekickt.\n**Reden:** {reason}"))
+    await interaction.response.send_message(embed=success_embed("Kicked", f"{user.mention} has been kicked.\n**Reason:** {reason}"))
 
-@bot.tree.command(name="ban", description="Verbant een lid van de server")
+@bot.tree.command(name="ban", description="Bans a member from the server")
 @app_commands.checks.has_permissions(ban_members=True)
-async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "Geen reden opgegeven"):
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
     await user.ban(reason=reason)
-    await interaction.response.send_message(embed=success_embed("Banned", f"{user.mention} is verbannen.\n**Reden:** {reason}"))
+    await interaction.response.send_message(embed=success_embed("Banned", f"{user.mention} has been banned.\n**Reason:** {reason}"))
 
-@bot.tree.command(name="timeout", description="Zet een lid tijdelijk op mute/timeout")
+@bot.tree.command(name="timeout", description="Timeout a member for a specified duration")
 @app_commands.checks.has_permissions(moderate_members=True)
-async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "Geen reden"):
+async def timeout(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str = "No reason provided"):
     duration = datetime.timedelta(minutes=minutes)
     await user.timeout(duration, reason=reason)
-    await interaction.response.send_message(embed=success_embed("Timeout", f"{user.mention} is in timeout gezet voor {minutes} minuten."))
+    await interaction.response.send_message(embed=success_embed("Timeout", f"{user.mention} has been timed out for {minutes} minutes."))
 
-@bot.tree.command(name="untimeout", description="Verwijder timeout van een lid")
+@bot.tree.command(name="untimeout", description="Remove timeout from a member")
 @app_commands.checks.has_permissions(moderate_members=True)
 async def untimeout(interaction: discord.Interaction, user: discord.Member):
     await user.timeout(None)
-    await interaction.response.send_message(embed=success_embed("Timeout Opgeheven", f"Timeout van {user.mention} is verwijderd."))
+    await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Timeout for {user.mention} has been removed."))
 
-@bot.tree.command(name="warn", description="Geef een officiële waarschuwing aan een lid")
+@bot.tree.command(name="warn", description="Issue a warning to a member")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
     await db.execute("INSERT INTO warnings (guild_id, user_id, moderator_id, reason) VALUES (?, ?, ?, ?)",
                      (interaction.guild_id, user.id, interaction.user.id, reason))
-    await interaction.response.send_message(embed=warning_embed("Waarschuwing", f"{user.mention} is GEWAARSCHUWD.\n**Reden:** {reason}"))
+    await interaction.response.send_message(embed=warning_embed("Warning Issued", f"{user.mention} has been WARNED.\n**Reason:** {reason}"))
 
-@bot.tree.command(name="warnings", description="Bekijk waarschuwingen van een lid")
+@bot.tree.command(name="warnings", description="View warnings for a member")
 async def warnings(interaction: discord.Interaction, user: discord.Member):
     rows = await db.fetchall("SELECT id, reason, timestamp FROM warnings WHERE guild_id = ? AND user_id = ?", (interaction.guild_id, user.id))
     if not rows:
-        return await interaction.response.send_message(embed=success_embed("Waarschuwingen", f"{user.mention} heeft geen waarschuwingen."), ephemeral=True)
-    desc = "\n".join([f"`#{r[0]}` | **Reden:** {r[1]}" for r in rows])
-    await interaction.response.send_message(embed=create_embed(f"Waarschuwingen van {user.name}", desc))
+        return await interaction.response.send_message(embed=success_embed("Warnings", f"{user.mention} has no warnings."), ephemeral=True)
+    desc = "\n".join([f"`#{r[0]}` | **Reason:** {r[1]}" for r in rows])
+    await interaction.response.send_message(embed=create_embed(f"Warnings for {user.name}", desc))
 
-@bot.tree.command(name="purge", description="Verwijder een aantal berichten")
+@bot.tree.command(name="purge", description="Purge a specified number of messages")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def purge(interaction: discord.Interaction, amount: int):
     deleted = await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(embed=success_embed("Purge", f"{len(deleted)} berichten verwijderd."), ephemeral=True)
+    await interaction.response.send_message(embed=success_embed("Purge", f"Deleted {len(deleted)} messages."), ephemeral=True)
 
-@bot.tree.command(name="automod", description="Schakel AutoMod in of uit")
+@bot.tree.command(name="automod", description="Enable or disable AutoMod")
 @app_commands.checks.has_permissions(administrator=True)
 async def automod_toggle(interaction: discord.Interaction, enabled: bool):
     await db.execute("INSERT INTO guild_settings (guild_id, automod_enabled) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET automod_enabled = ?",
                      (interaction.guild_id, enabled, enabled))
-    status = "ingeschakeld" if enabled else "uitgeschakeld"
-    await interaction.response.send_message(embed=success_embed("AutoMod", f"AutoMod is nu **{status}**."))
+    status = "enabled" if enabled else "disabled"
+    await interaction.response.send_message(embed=success_embed("AutoMod", f"AutoMod is now **{status}**."))
 
-@bot.tree.command(name="setup_tickets", description="Plaats het ticket paneel in dit kanaal")
+@bot.tree.command(name="setup_tickets", description="Create the ticket panel in this channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_tickets(interaction: discord.Interaction, category: discord.CategoryChannel = None):
     if category:
         await db.execute("INSERT INTO ticket_configs (guild_id, category_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET category_id = ?",
                          (interaction.guild_id, category.id, category.id))
-    await interaction.channel.send(embed=create_embed("Support Tickets", "Klik op het knopje om een ticket te openen."), view=TicketView())
-    await interaction.response.send_message(embed=success_embed("Tickets", "Ticket paneel geplaatst."), ephemeral=True)
+    await interaction.channel.send(embed=create_embed("Support Tickets", "Click the button below to open a ticket."), view=TicketView())
+    await interaction.response.send_message(embed=success_embed("Tickets", "Ticket panel successfully created."), ephemeral=True)
 
-@bot.tree.command(name="giveaway", description="Start een giveaway")
+@bot.tree.command(name="giveaway", description="Start a giveaway")
 @app_commands.checks.has_permissions(manage_events=True)
 async def start_giveaway(interaction: discord.Interaction, duration_minutes: int, winners: int, prize: str):
     end_time = time.time() + (duration_minutes * 60)
-    embed = create_embed(f"🎉 GIVEAWAY: {prize}", f"Klik op 🎉 om mee te doen!\n**Winnaars:** {winners}\n**Eindigt:** <t:{int(end_time)}:R>")
+    embed = create_embed(f"🎉 GIVEAWAY: {prize}", f"React with 🎉 to enter!\n**Winners:** {winners}\n**Ends:** <t:{int(end_time)}:R>")
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
     await msg.add_reaction("🎉")
     await db.execute("INSERT INTO giveaways (message_id, channel_id, guild_id, prize, end_time, winners) VALUES (?, ?, ?, ?, ?, ?)",
                      (msg.id, interaction.channel_id, interaction.guild_id, prize, end_time, winners))
 
-@bot.tree.command(name="userinfo", description="Bekijk informatie over een gebruiker")
+@bot.tree.command(name="userinfo", description="Get information about a user")
 async def userinfo(interaction: discord.Interaction, user: discord.Member = None):
     user = user or interaction.user
-    embed = create_embed(f"Gebruikersinfo - {user.name}", f"ID: `{user.id}`")
+    embed = create_embed(f"User Info - {user.name}", f"ID: `{user.id}`")
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="Geregistreerd", value=f"<t:{int(user.created_at.timestamp())}:D>", inline=True)
-    embed.add_field(name="Gejoined", value=f"<t:{int(user.joined_at.timestamp())}:D>", inline=True)
+    embed.add_field(name="Account Created", value=f"<t:{int(user.created_at.timestamp())}:D>", inline=True)
+    embed.add_field(name="Joined Server", value=f"<t:{int(user.joined_at.timestamp())}:D>", inline=True)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="serverinfo", description="Bekijk informatie over deze server")
+@bot.tree.command(name="serverinfo", description="Get information about this server")
 async def serverinfo(interaction: discord.Interaction):
     guild = interaction.guild
-    embed = create_embed(f"Serverinfo - {guild.name}", f"ID: `{guild.id}`")
+    embed = create_embed(f"Server Info - {guild.name}", f"ID: `{guild.id}`")
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
-    embed.add_field(name="Eigenaar", value=f"<@{guild.owner_id}>", inline=True)
-    embed.add_field(name="Leden", value=f"{guild.member_count}", inline=True)
+    embed.add_field(name="Owner", value=f"<@{guild.owner_id}>", inline=True)
+    embed.add_field(name="Members", value=f"{guild.member_count}", inline=True)
     await interaction.response.send_message(embed=embed)
 
 # ==========================================
-# WEB SERVER (KEEP-ALIVE VOOR RENDER)
+# WEB SERVER (KEEP-ALIVE FOR RENDER)
 # ==========================================
 async def handle_ping(request):
-    return web.Response(text="Bot is online en actief!")
+    return web.Response(text="Bot is online and active!")
 
 async def start_web_server():
     app = web.Application()
@@ -335,7 +335,7 @@ async def start_web_server():
 # ==========================================
 async def main():
     if not DISCORD_TOKEN:
-        raise ValueError("DISCORD_TOKEN omgevingsvariabele ontbreekt!")
+        raise ValueError("DISCORD_TOKEN environment variable is missing!")
 
     await start_web_server()
     await bot.start(DISCORD_TOKEN)
