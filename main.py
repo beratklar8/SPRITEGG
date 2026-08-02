@@ -38,7 +38,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         print(f"Fout bij initialiseren Gemini Client: {e}")
 
-# In-memory storage for sticky messages (channel_id: {"message": str, "last_msg_id": int})
+# In-memory storage for sticky messages
 sticky_messages = {}
 
 # ==========================================
@@ -203,8 +203,12 @@ class ModerationBot(commands.Bot):
         intents.message_content = True
         intents.members = True
         intents.reactions = True
+        intents.guilds = True
+        intents.voice_states = True
+        intents.invites = True
         super().__init__(command_prefix="!", intents=intents)
         self.invite_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
+        self.invites = {}
 
     async def setup_hook(self):
         await db.init()
@@ -218,6 +222,11 @@ class ModerationBot(commands.Bot):
         await self.change_presence(
             activity=discord.CustomActivity(name="Chat via mentions | /help")
         )
+        for guild in self.guilds:
+            try:
+                self.invites[guild.id] = await guild.invites()
+            except Exception:
+                pass
 
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -240,9 +249,7 @@ class ModerationBot(commands.Bot):
                         reply_text = response.text[:1900]
                         await message.reply(reply_text)
                     except Exception as e:
-                        import traceback
                         traceback.print_exc()
-
                         error_str = str(e)
                         if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                             await message.reply("You have reached your message limit, please try again later.")
@@ -277,6 +284,133 @@ class ModerationBot(commands.Bot):
                     pass
             new_msg = await message.channel.send(embed=create_embed("📌 Sticky Message", sticky_data["message"]))
             sticky_messages[message.channel.id]["last_msg_id"] = new_msg.id
+
+    # ==========================================
+    # DETAILED AUDIT LOG EVENTS
+    # ==========================================
+    async def on_message_delete(self, message: discord.Message):
+        if not message.guild or message.author.bot:
+            return
+        
+        has_image = any(att.content_type and 'image' in att.content_type for att in message.attachments)
+        if has_image:
+            embed = warning_embed("🖼️ Image Delete", f"**Author:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}")
+        else:
+            content = message.content or "[Geen tekst]"
+            embed = warning_embed("🗑️ Message Delete", f"**Author:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}\n**Content:**\n```{content[:1000]}```")
+        await send_log(message.guild, embed)
+
+    async def on_bulk_message_delete(self, messages: list[discord.Message]):
+        if not messages or not messages[0].guild:
+            return
+        guild = messages[0].guild
+        embed = warning_embed("📦 Bulk Message Delete", f"**Amount:** `{len(messages)}` messages deleted in {messages[0].channel.mention}.")
+        await send_log(guild, embed)
+
+    async def on_raw_message_update(self, payload: discord.RawMessageUpdateEvent):
+        if not payload.guild_id:
+            return
+        guild = self.get_guild(payload.guild_id)
+        if not guild:
+            return
+        data = payload.data
+        if "content" in data:
+            new_content = data.get("content")
+            embed = create_embed("✏️ Message Edit", f"**Channel:** <#{payload.channel_id}>\n**New Content:**\n```{new_content[:1000]}```", COLOR_WARNING)
+            await send_log(guild, embed)
+
+    async def on_member_join(self, member: discord.Member):
+        guild = member.guild
+        used_invite = None
+        try:
+            old_invites = self.invites.get(guild.id, [])
+            new_invites = await guild.invites()
+            self.invites[guild.id] = new_invites
+            for inv in new_invites:
+                for old in old_invites:
+                    if inv.code == old.code and inv.uses > old.uses:
+                        used_invite = inv
+                        break
+        except Exception:
+            pass
+
+        inv_text = f"**Invite Code:** `{used_invite.code}` (Created by {used_invite.inviter.mention}, Uses: `{used_invite.uses}`)" if used_invite else "**Invite Info:** Unknown"
+        embed = success_embed("📥 Member Join", f"**User:** {member.mention} (`{member.id}`)\n{inv_text}\n**Account Age:** <t:{int(member.created_at.timestamp())}:R>")
+        await send_log(guild, embed)
+
+    async def on_member_remove(self, member: discord.Member):
+        embed = error_embed("📤 Member Leave", f"**User:** {member.mention} (`{member.id}`)")
+        await send_log(member.guild, embed)
+
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        guild = after.guild
+        if before.nick != after.nick:
+            embed = create_embed("🏷️ Nickname Change", f"**User:** {after.mention}\n**Before:** `{before.nick or before.name}`\n**After:** `{after.nick or after.name}`", COLOR_WARNING)
+            await send_log(guild, embed)
+        
+        if before.timed_out_until != after.timed_out_until:
+            if after.is_timed_out():
+                embed = warning_embed("⏳ Member Timeout", f"**User:** {after.mention} timed out until <t:{int(after.timed_out_until.timestamp())}:F>")
+                await send_log(guild, embed)
+
+    async def on_user_update(self, before: discord.User, after: discord.User):
+        pass
+
+    async def on_member_ban(self, guild: discord.Guild, user: discord.User | discord.Member):
+        embed = error_embed("🔨 Member Ban", f"**User:** {user.mention} (`{user.id}`)")
+        await send_log(guild, embed)
+
+    async def on_member_unban(self, guild: discord.Guild, user: discord.User):
+        embed = success_embed("🔓 Member Unban", f"**User:** {user.mention} (`{user.id}`)")
+        await send_log(guild, embed)
+
+    async def on_guild_role_create(self, role: discord.Role):
+        embed = success_embed("✨ Role Create", f"**Role:** {role.mention} (`{role.id}`)")
+        await send_log(role.guild, embed)
+
+    async def on_guild_role_delete(self, role: discord.Role):
+        embed = error_embed("🗑️ Role Delete", f"**Role:** {role.name} (`{role.id}`)")
+        await send_log(role.guild, embed)
+
+    async def on_guild_role_update(self, before: discord.Role, after: discord.Role):
+        embed = create_embed("🛠️ Role Update", f"**Role:** {after.mention} updated.", COLOR_WARNING)
+        await send_log(after.guild, embed)
+
+    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
+        embed = success_embed("📂 Channel Create", f"**Channel:** {channel.mention} (`{channel.id}`)")
+        await send_log(channel.guild, embed)
+
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
+        embed = error_embed("📁 Channel Delete", f"**Channel:** #{channel.name} (`{channel.id}`)")
+        await send_log(channel.guild, embed)
+
+    async def on_guild_channel_update(self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel):
+        embed = create_embed("📁 Channel Update", f"**Channel:** {after.mention} settings were updated.", COLOR_WARNING)
+        await send_log(after.guild, embed)
+
+    async def on_guild_emojis_update(self, guild: discord.Guild, before: tuple[discord.Emoji, ...], after: tuple[discord.Emoji, ...]):
+        if len(after) > len(before):
+            added = set(after) - set(before)
+            for emoji in added:
+                embed = success_embed("😀 Emoji Create", f"**Emoji:** {emoji} (`{emoji.name}`)")
+                await send_log(guild, embed)
+        elif len(after) < len(before):
+            removed = set(before) - set(after)
+            for emoji in removed:
+                embed = error_embed("❌ Emoji Delete", f"**Emoji Name:** `{emoji.name}`")
+                await send_log(guild, embed)
+
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        guild = member.guild
+        if not before.channel and after.channel:
+            embed = success_embed("🔊 Voice Channel Join", f"**User:** {member.mention} joined {after.channel.mention}")
+            await send_log(guild, embed)
+        elif before.channel and not after.channel:
+            embed = error_embed("🔇 Voice Channel Leave", f"**User:** {member.mention} left {before.channel.mention}")
+            await send_log(guild, embed)
+        elif before.channel and after.channel and before.channel.id != after.channel.id:
+            embed = create_embed("🔀 Voice Channel Move", f"**User:** {member.mention} moved from {before.channel.mention} to {after.channel.mention}", COLOR_WARNING)
+            await send_log(guild, embed)
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.user.id:
@@ -349,7 +483,7 @@ class ModerationBot(commands.Bot):
                 try:
                     user = await self.fetch_user(u_id)
                     await guild.unban(user, reason="Tempban expired")
-                    await send_log(guild, success_embed("Tempban Expired", f"User {user.name} ({user.id}) was automatically unbanned."))
+                    await send_log(guild, success_embed("Tempban Expired", f"User {user.name} (`{user.id}`) was automatically unbanned."))
                 except Exception:
                     pass
 
@@ -366,7 +500,7 @@ async def set_logs(interaction: discord.Interaction, channel: discord.TextChanne
     await interaction.response.send_message(embed=success_embed("Logs Channel Set", f"Logs will now be sent to {channel.mention}."), ephemeral=True)
 
 # ==========================================
-# MODERATION COMMANDS (MET LOGS & DM NOTIFICATIES)
+# MODERATION COMMANDS
 # ==========================================
 @bot.tree.command(name="kick", description="Kicks a member from the server")
 @app_commands.checks.has_permissions(kick_members=True)
@@ -693,7 +827,7 @@ async def poll(interaction: discord.Interaction, question: str):
     await msg.add_reaction("👎")
     await send_log(interaction.guild, create_embed("Poll Created", f"**Question:** {question}\n**Creator:** {interaction.user.mention}"))
 
-@bot.tree.command(name="embed_builder", description="Code a custom embed message")
+@bot.tree.command(name="embed_builder", description="Create a custom embed message")
 @app_commands.checks.has_permissions(manage_messages=True)
 async def embed_builder(interaction: discord.Interaction, title: str, description: str, color_hex: Optional[str] = "5865F2"):
     try:
