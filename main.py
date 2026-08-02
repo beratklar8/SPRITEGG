@@ -238,10 +238,7 @@ class ModerationBot(commands.Bot):
         f"❌ Gemini Error\n"
         f"Type: `{type(e).__name__}`\n"
         f"Message:\n```{e}```"
-    )
-                else:
-                    await message.reply("⚠️ AI is momenteel niet geconfigureerd. Controleer of de `GEMINI_API_KEY` omgevingsvariabele is ingesteld.")
-            return
+                        )
 
         # 2. AutoMod Checks
         row = await db.fetchone("SELECT automod_enabled FROM guild_settings WHERE guild_id = ?", (message.guild.id,))
