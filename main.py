@@ -30,7 +30,7 @@ COLOR_SUCCESS = 0x57F287    # Green
 COLOR_WARNING = 0xFEE75C    # Yellow
 COLOR_ERROR = 0xED4245      # Red
 
-# Initialize Gemini AI Client (Veilig geïnitialiseerd)
+# Initialize Gemini AI Client
 ai_client = None
 if GEMINI_API_KEY:
     try:
@@ -215,9 +215,9 @@ class ModerationBot(commands.Bot):
             async with message.channel.typing():
                 if ai_client:
                     try:
-                        # Native Async Call naar gemini-2.0-flash-lite
+                        # Gebruik gemini-2.5-flash
                         response = await ai_client.aio.models.generate_content(
-                            model='gemini-2.0-flash-lite',
+                            model='gemini-2.5-flash',
                             contents=clean_content
                         )
                         reply_text = response.text[:1900]
