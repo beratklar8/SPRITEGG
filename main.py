@@ -225,20 +225,17 @@ class ModerationBot(commands.Bot):
                         await message.reply(reply_text)
                     except Exception as e:
                         import traceback
-
                         traceback.print_exc()
 
-                        print("=" * 60)
-                        print("FULL GEMINI ERROR")
-                        print(type(e).__name__)
-                        print(str(e))
-                        print("=" * 60)
-
-                        await message.reply(
-                            f"❌ Gemini Error\n"
-                            f"Type: `{type(e).__name__}`\n"
-                            f"Message:\n```{e}```"
-                        )
+                        error_str = str(e)
+                        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                            await message.reply("You have reached your message limit, please try again later.")
+                        else:
+                            await message.reply(
+                                f"❌ Gemini Error\n"
+                                f"Type: `{type(e).__name__}`\n"
+                                f"Message:\n```{e}```"
+                            )
 
         # 2. AutoMod Checks
         row = await db.fetchone("SELECT automod_enabled FROM guild_settings WHERE guild_id = ?", (message.guild.id,))
