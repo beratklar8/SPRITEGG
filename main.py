@@ -224,11 +224,21 @@ class ModerationBot(commands.Bot):
                         reply_text = response.text[:1900]
                         await message.reply(reply_text)
                     except Exception as e:
-                        print(f"AI ERROR DETAIL: {type(e).__name__} - {e}")
-                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                            await message.reply("⚠️ You reached your max message limit. Try again in a couple of minutes!")
-                        else:
-                            await message.reply(f"⚠️ AI Error: `{type(e).__name__}` - {e}")
+    import traceback
+
+    traceback.print_exc()
+
+    print("=" * 60)
+    print("FULL GEMINI ERROR")
+    print(type(e).__name__)
+    print(str(e))
+    print("=" * 60)
+
+    await message.reply(
+        f"❌ Gemini Error\n"
+        f"Type: `{type(e).__name__}`\n"
+        f"Message:\n```{e}```"
+    )
                 else:
                     await message.reply("⚠️ AI is momenteel niet geconfigureerd. Controleer of de `GEMINI_API_KEY` omgevingsvariabele is ingesteld.")
             return
