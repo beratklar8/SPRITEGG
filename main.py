@@ -199,7 +199,7 @@ class ModerationBot(commands.Bot):
         if message.author.bot or not message.guild:
             return
 
-        # 1. AI Chat Response when bot is mentioned (@SPRITEGG)
+        # 1. AI Chat Response when bot is mentioned
         if self.user.mentioned_in(message) and not message.mention_everyone:
             clean_content = message.content.replace(f'<@{self.user.id}>', '').replace(f'<@!{self.user.id}>', '').strip()
             
@@ -211,7 +211,7 @@ class ModerationBot(commands.Bot):
                     try:
                         response = await asyncio.to_thread(
                             ai_client.models.generate_content,
-                            model='gemini-2.5-flash',
+                            model='gemini-1.5-flash',
                             contents=clean_content
                         )
                         reply_text = response.text[:1900]
