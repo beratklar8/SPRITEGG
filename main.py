@@ -4,6 +4,7 @@ import time
 import random
 import asyncio
 import datetime
+import traceback
 from typing import Optional
 
 import discord
@@ -29,8 +30,13 @@ COLOR_SUCCESS = 0x57F287    # Green
 COLOR_WARNING = 0xFEE75C    # Yellow
 COLOR_ERROR = 0xED4245      # Red
 
-# Initialize Gemini AI Client
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# Initialize Gemini AI Client (Veilig geïnitialiseerd)
+ai_client = None
+if GEMINI_API_KEY:
+    try:
+        ai_client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"Fout bij initialiseren Gemini Client: {e}")
 
 # In-memory storage for sticky messages (channel_id: {"message": str, "last_msg_id": int})
 sticky_messages = {}
@@ -209,7 +215,7 @@ class ModerationBot(commands.Bot):
             async with message.channel.typing():
                 if ai_client:
                     try:
-                        # Native Async Gemini Call
+                        # Native Async Call
                         response = await ai_client.aio.models.generate_content(
                             model='gemini-2.0-flash',
                             contents=clean_content
@@ -217,10 +223,11 @@ class ModerationBot(commands.Bot):
                         reply_text = response.text[:1900]
                         await message.reply(reply_text)
                     except Exception as e:
-                        print(f"AI Error Detail: {e}")
-                        await message.reply("Sorry, I had trouble processing that request.")
+                        print(f"AI ERROR DETAIL: {type(e).__name__} - {e}")
+                        traceback.print_exc()
+                        await message.reply(f"⚠️ AI Error: `{type(e).__name__}` - {e}")
                 else:
-                    await message.reply("AI is currently not configured. Please set the `GEMINI_API_KEY` environment variable.")
+                    await message.reply("⚠️ AI is momenteel niet geconfigureerd. Controleer of de `GEMINI_API_KEY` omgevingsvariabele is ingesteld.")
             return
 
         # 2. AutoMod Checks
