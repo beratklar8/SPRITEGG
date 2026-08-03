@@ -42,7 +42,6 @@ if GEMINI_API_SECRET:
 
 # In-memory stores for active features
 sticky_messages = {}
-afk_users = {}
 user_cooldowns = {}
 
 # =====================================================================
@@ -74,7 +73,7 @@ def info_embed(title: str, description: str) -> discord.Embed:
 # ADVANCED DATABASE CONTROLLER LAYER
 # =====================================================================
 class DatabaseController:
-    """Manages all asynchronous SQLite database interactions and extensive schema bootstrapping."""
+    """Manages all asynchronous SQLite database interactions and schema bootstrapping."""
     def __init__(self, db_path: str = DATABASE_NAME):
         self.db_path = db_path
 
@@ -100,19 +99,6 @@ class DatabaseController:
                 )
             """)
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS ticket_settings (
-                    guild_id INTEGER PRIMARY KEY,
-                    category_id INTEGER
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS active_tickets (
-                    channel_id INTEGER PRIMARY KEY,
-                    guild_id INTEGER,
-                    target_id INTEGER
-                )
-            """)
-            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS giveaway_system (
                     message_id INTEGER PRIMARY KEY,
                     channel_id INTEGER,
@@ -126,9 +112,7 @@ class DatabaseController:
                 CREATE TABLE IF NOT EXISTS server_settings (
                     guild_id INTEGER PRIMARY KEY,
                     automod_status BOOLEAN DEFAULT 0,
-                    log_channel_id INTEGER,
-                    welcome_channel_id INTEGER,
-                    welcome_message TEXT
+                    log_channel_id INTEGER
                 )
             """)
             await conn.execute("""
@@ -137,34 +121,6 @@ class DatabaseController:
                     emoji_icon TEXT,
                     role_id INTEGER,
                     PRIMARY KEY (message_id, emoji_icon)
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS vouch_records (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER,
-                    recipient_id INTEGER,
-                    author_id INTEGER,
-                    comment TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS custom_tags (
-                    guild_id INTEGER,
-                    tag_name TEXT,
-                    tag_content TEXT,
-                    PRIMARY KEY (guild_id, tag_name)
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_notes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER,
-                    target_id INTEGER,
-                    author_id INTEGER,
-                    note_content TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             await conn.commit()
@@ -207,52 +163,10 @@ async def dispatch_audit_log(guild: discord.Guild, embed: discord.Embed):
                 pass
 
 # =====================================================================
-# PERSISTENT VIEWS: TICKET SYSTEM INTERFACE
-# =====================================================================
-class TicketCreationView(discord.ui.View):
-    """Persistent user interface panel for handling community help tickets."""
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Open Support Ticket", style=discord.ButtonStyle.primary, custom_id="persistent_ticket_open_btn_v4")
-    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        res = await db_controller.fetchone("SELECT category_id FROM ticket_settings WHERE guild_id = ?", (guild.id,))
-        cat_id = res[0] if res else None
-        category_obj = guild.get_channel(cat_id) if cat_id else None
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-
-        ticket_chan = await guild.create_text_channel(
-            name=f"ticket-{interaction.user.name}",
-            category=category_obj,
-            overwrites=overwrites
-        )
-
-        await db_controller.execute(
-            "INSERT INTO active_tickets (channel_id, guild_id, target_id) VALUES (?, ?, ?)",
-            (ticket_chan.id, guild.id, interaction.user.id)
-        )
-
-        close_view = discord.ui.View(timeout=None)
-        close_btn = discord.ui.Button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="persistent_ticket_close_btn_v4")
-        close_view.add_item(close_btn)
-
-        await ticket_chan.send(
-            embed=make_embed("Support System", f"Welcome {interaction.user.mention}!\nPlease describe your inquiry in full detail below. Support staff will be with you shortly."),
-            view=close_view
-        )
-        await interaction.response.send_message(content=f"Your ticket has been opened successfully: {ticket_chan.mention}", ephemeral=True)
-
-# =====================================================================
-# CORE BOT CLIENT IMPLEMENTATION (EXTENSIVE EVENT ARCHITECTURE)
+# CORE BOT CLIENT IMPLEMENTATION
 # =====================================================================
 class ExtendedBotClient(commands.Bot):
-    """Main application client encapsulating advanced event handlers, filters, and background loops."""
+    """Main application client encapsulating event handlers, filters, and background loops."""
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -264,21 +178,130 @@ class ExtendedBotClient(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         
         self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
-        self.url_regex = re.compile(r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+")
         self.server_invite_cache = {}
 
     async def setup_hook(self):
-        """Asynchronous initialization routine for views, background tasks, and command tree synchronization."""
+        """Asynchronous initialization routine for background tasks and command tree synchronization."""
         await db_controller.initialize_database()
-        self.add_view(TicketCreationView())
         self.background_giveaway_loop.start()
         self.background_tempban_loop.start()
+        
+        # Load Moderation, Giveaway, Sticky & Reaction Role Commands
+        @self.tree.command(name="ban", description="Ban a member from the server.")
+        @app_commands.default_permissions(ban_members=True)
+        async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
+            if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Permission Denied", "You cannot ban someone with an equal or higher role."), ephemeral=True)
+            try:
+                await member.ban(reason=reason)
+                await interaction.response.send_message(embed=success_embed("Member Banned", f"Successfully banned {member.mention}.\nReason: {reason}"))
+                await dispatch_audit_log(interaction.guild, error_embed("Member Banned", f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to ban member: {e}"), ephemeral=True)
+
+        @self.tree.command(name="tempban", description="Temporary ban a member from the server.")
+        @app_commands.default_permissions(ban_members=True)
+        async def tempban_slash(interaction: discord.Interaction, member: discord.Member, duration_hours: float, reason: Optional[str] = "No reason provided"):
+            if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Permission Denied", "You cannot temp-ban this user."), ephemeral=True)
+            expiry = time.time() + (duration_hours * 3600)
+            try:
+                await member.ban(reason=reason)
+                await db_controller.execute("INSERT OR REPLACE INTO temporary_bans (guild_id, target_id, expiry_timestamp) VALUES (?, ?, ?)", (interaction.guild.id, member.id, expiry))
+                await interaction.response.send_message(embed=success_embed("Temporary Ban Applied", f"Successfully banned {member.mention} for {duration_hours} hours."))
+                await dispatch_audit_log(interaction.guild, warning_embed("Temporary Ban", f"**Member:** {member.mention}\n**Duration:** {duration_hours}h\n**Moderator:** {interaction.user.mention}"))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to temp-ban member: {e}"), ephemeral=True)
+
+        @self.tree.command(name="kick", description="Kick a member from the server.")
+        @app_commands.default_permissions(kick_members=True)
+        async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
+            if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Permission Denied", "You cannot kick this user."), ephemeral=True)
+            try:
+                await member.kick(reason=reason)
+                await interaction.response.send_message(embed=success_embed("Member Kicked", f"Successfully kicked {member.mention}."))
+                await dispatch_audit_log(interaction.guild, warning_embed("Member Kicked", f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}"))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to kick member: {e}"), ephemeral=True)
+
+        @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes.")
+        @app_commands.default_permissions(moderate_members=True)
+        async def timeout_slash(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: Optional[str] = "No reason provided"):
+            try:
+                duration = datetime.timedelta(minutes=minutes)
+                await member.timeout(duration, reason=reason)
+                await interaction.response.send_message(embed=success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes."))
+                await dispatch_audit_log(interaction.guild, warning_embed("Member Timed Out", f"**Member:** {member.mention}\n**Duration:** {minutes}m\n**Moderator:** {interaction.user.mention}"))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to timeout member: {e}"), ephemeral=True)
+
+        @self.tree.command(name="purge", description="Bulk delete messages in the channel.")
+        @app_commands.default_permissions(manage_messages=True)
+        async def purge_slash(interaction: discord.Interaction, amount: int):
+            await interaction.response.defer(ephemeral=True)
+            deleted = await interaction.channel.purge(limit=amount)
+            await interaction.followup.send(embed=success_embed("Purge Complete", f"Successfully deleted {len(deleted)} messages."), ephemeral=True)
+
+        @self.tree.command(name="warn", description="Issue an official warning to a member.")
+        @app_commands.default_permissions(moderate_members=True)
+        async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str):
+            await db_controller.execute("INSERT INTO warning_records (guild_id, target_id, moderator_id, reason) VALUES (?, ?, ?, ?)", (interaction.guild.id, member.id, interaction.user.id, reason))
+            await interaction.response.send_message(embed=success_embed("Warning Issued", f"Warned {member.mention} for: {reason}"))
+            await dispatch_audit_log(interaction.guild, warning_embed("Warning Logged", f"**User:** {member.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
+
+        @self.tree.command(name="automod", description="Toggle or configure the AutoMod filter status.")
+        @app_commands.default_permissions(administrator=True)
+        async def automod_slash(interaction: discord.Interaction, status: bool):
+            await db_controller.execute("INSERT INTO server_settings (guild_id, automod_status) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET automod_status = ?", (interaction.guild.id, status, status))
+            await interaction.response.send_message(embed=success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`"))
+
+        @self.tree.command(name="setlogchannel", description="Set the log channel for server events.")
+        @app_commands.default_permissions(administrator=True)
+        async def setlogchannel_slash(interaction: discord.Interaction, channel: discord.TextChannel):
+            await db_controller.execute("INSERT INTO server_settings (guild_id, log_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = ?", (interaction.guild.id, channel.id, channel.id))
+            await interaction.response.send_message(embed=success_embed("Log Channel Configured", f"Audit logs will now be sent to {channel.mention}."))
+
+        @self.tree.command(name="giveaway", description="Start a new server giveaway.")
+        @app_commands.default_permissions(manage_guild=True)
+        async def giveaway_slash(interaction: discord.Interaction, prize: str, duration_minutes: float):
+            ends_at = time.time() + (duration_minutes * 60)
+            embed = make_embed("🎉 GIVEAWAY 🎉", f"Prize: **{prize}**\nReact with 🎉 to enter!\nEnds: <t:{int(ends_at)}:R>", COLOR_PURPLE)
+            await interaction.response.send_message(embed=success_embed("Giveaway Started", "Giveaway message deployed!"), ephemeral=True)
+            msg = await interaction.channel.send(embed=embed)
+            await msg.add_reaction("🎉")
+            await db_controller.execute("INSERT INTO giveaway_system (message_id, channel_id, guild_id, prize_name, ends_at) VALUES (?, ?, ?, ?, ?)", (msg.id, interaction.channel.id, interaction.guild.id, prize, ends_at))
+
+        @self.tree.command(name="sticky", description="Create or clear a sticky message in the channel.")
+        @app_commands.default_permissions(manage_messages=True)
+        async def sticky_slash(interaction: discord.Interaction, text: Optional[str] = None):
+            if not text:
+                if interaction.channel.id in sticky_messages:
+                    del sticky_messages[interaction.channel.id]
+                return await interaction.response.send_message(embed=success_embed("Sticky Removed", "Sticky message cleared for this channel."), ephemeral=True)
+            
+            msg = await interaction.channel.send(embed=make_embed("Pinned Operational Notice", text))
+            sticky_messages[interaction.channel.id] = {"text": text, "message_id": msg.id}
+            await interaction.response.send_message(embed=success_embed("Sticky Active", "Sticky message successfully deployed."), ephemeral=True)
+
+        @self.tree.command(name="reactionrole", description="Bind a reaction emoji to a role on a message.")
+        @app_commands.default_permissions(administrator=True)
+        async def reactionrole_slash(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
+            try:
+                m_id = int(message_id)
+                msg = await interaction.channel.fetch_message(m_id)
+                await msg.add_reaction(emoji)
+                await db_controller.execute("INSERT OR REPLACE INTO reaction_role_bindings (message_id, emoji_icon, role_id) VALUES (?, ?, ?)", (m_id, emoji, role.id))
+                await interaction.response.send_message(embed=success_embed("Reaction Role Bound", f"Successfully linked {emoji} to {role.mention} on message `{m_id}`."), ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to bind reaction role: {e}"), ephemeral=True)
+
         await self.tree.sync()
 
     async def on_ready(self):
         """Fires when the bot establishes connection and completes initialization."""
         print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
-        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security & moderation | /help"))
+        await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
         for guild in self.guilds:
             try:
                 self.server_invite_cache[guild.id] = await guild.invites()
@@ -286,24 +309,11 @@ class ExtendedBotClient(commands.Bot):
                 pass
 
     async def on_message(self, message: discord.Message):
-        """Comprehensive message event listener handling AI interactions, AFK checks, automod, and sticky posts."""
+        """Comprehensive message event listener handling AI interactions, automod, and sticky posts."""
         if message.author.bot or not message.guild:
             return
 
-        # 1. AFK Status System Handler
-        if message.author.id in afk_users:
-            del afk_users[message.author.id]
-            try:
-                await message.channel.send(f"Welcome back {message.author.mention}, I have removed your AFK status.", delete_after=5)
-            except Exception:
-                pass
-
-        for mention in message.mentions:
-            if mention.id in afk_users:
-                afk_reason = afk_users[mention.id]
-                await message.channel.send(f"⚠ **{mention.name}** is currently AFK: {afk_reason}", delete_after=10)
-
-        # 2. Gemini AI Integration Handler
+        # 1. Gemini AI Integration Handler
         if self.user.mentioned_in(message) and not message.mention_everyone:
             clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
             
@@ -326,7 +336,7 @@ class ExtendedBotClient(commands.Bot):
                         else:
                             await message.reply(f"AI error encountered: `{type(err).__name__}`")
 
-        # 3. Advanced Automod Filter Suite
+        # 2. Advanced Automod Filter Suite (Invite Links & Caps)
         settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (message.guild.id,))
         if settings and settings[0] and not message.author.guild_permissions.manage_messages:
             if self.invite_link_regex.search(message.content):
@@ -339,7 +349,7 @@ class ExtendedBotClient(commands.Bot):
                 await dispatch_audit_log(message.guild, warning_embed("Automod Action Triggered", f"Removed uppercase text spam sent by {message.author.mention} in {message.channel.mention}."))
                 return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, please avoid excessive capitalization."), delete_after=5)
 
-        # 4. Sticky Messages Handler
+        # 3. Sticky Messages Handler
         if message.channel.id in sticky_messages:
             sticky_data = sticky_messages[message.channel.id]
             if sticky_data.get("message_id"):
@@ -371,16 +381,6 @@ class ExtendedBotClient(commands.Bot):
 
         invite_details = f"Invite: `{used_invite.code}` (Inviter: {used_invite.inviter}, Total Uses: {used_invite.uses})" if used_invite else "Invite tracking data unavailable"
         await dispatch_audit_log(guild, success_embed("Member Joined", f"**Member:** {member.mention} (`{member.id}`)\n{invite_details}"))
-
-        res = await db_controller.fetchone("SELECT welcome_channel_id, welcome_message FROM server_settings WHERE guild_id = ?", (guild.id,))
-        if res and res[0] and res[1]:
-            w_chan = guild.get_channel(res[0])
-            if w_chan:
-                try:
-                    formatted_msg = res[1].replace("{user}", member.mention).replace("{server}", guild.name)
-                    await w_chan.send(formatted_msg)
-                except Exception:
-                    pass
 
     async def on_member_remove(self, member: discord.Member):
         await dispatch_audit_log(member.guild, error_embed("Member Left", f"**Member:** {member.mention} (`{member.id}`)"))
@@ -457,7 +457,6 @@ class ExtendedBotClient(commands.Bot):
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
         if user.bot:
             return
-        
         res = await db_controller.fetchone(
             "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
             (reaction.message.id, str(reaction.emoji))
@@ -474,7 +473,6 @@ class ExtendedBotClient(commands.Bot):
     async def on_reaction_remove(self, reaction: discord.Reaction, user: discord.User):
         if user.bot:
             return
-        
         res = await db_controller.fetchone(
             "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
             (reaction.message.id, str(reaction.emoji))
