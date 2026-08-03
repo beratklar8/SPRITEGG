@@ -22,7 +22,7 @@ DATABASE_NAME = os.getenv("DATABASE_PATH", "bot.db")
 WEB_PORT = int(os.getenv("PORT", 10000))
 GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
 
-# --- CONFIGURATIE VOOR STATUS KANALEN ---
+# --- CONFIGURATION FOR STATUS CHANNELS ---
 CHANNEL_ONLINE_ID = 1533920905258995905   # 🟢 SPRITEGG ONLINE
 CHANNEL_UPDATING_ID = 1533921928224702685 # 🔵 SPRITEGG UPDATING
 CHANNEL_OFFLINE_ID = 1533922000005894224  # 🔴 SPRITEGG OFFLINE
@@ -167,8 +167,8 @@ class ExtendedBotClient(commands.Bot):
 
     async def set_status(self, status: str):
         """
-        Beheert de zichtbaarheid van de statuskanalen op basis van de opgegeven status.
-        status kan zijn: 'online', 'updating', of 'offline'
+        Manages the visibility of the status channels based on the specified status.
+        status can be: 'online', 'updating', or 'offline'
         """
         channel_mapping = {
             'online': (CHANNEL_ONLINE_ID, CHANNEL_UPDATING_ID, CHANNEL_OFFLINE_ID),
@@ -193,12 +193,56 @@ class ExtendedBotClient(commands.Bot):
                         current_overwrite.view_channel = should_be_visible
                         await channel.set_permissions(channel.guild.default_role, overwrite=current_overwrite)
                 except Exception as e:
-                    print(f"Kon zichtbaarheid van kanaal {chan_id} niet wijzigen: {e}")
+                    print(f"Failed to change visibility of channel {chan_id}: {e}")
+
+    @tasks.loop(minutes=1)
+    async def background_giveaway_loop(self):
+        current_time = time.time()
+        rows = await db_controller.fetchall("SELECT message_id, channel_id, guild_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", (current_time,))
+        for row in rows:
+            msg_id, chan_id, guild_id, prize = row
+            await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
+            guild = self.get_guild(guild_id)
+            if not guild:
+                continue
+            channel = guild.get_channel(chan_id)
+            if not channel:
+                continue
+            try:
+                msg = await channel.fetch_message(msg_id)
+                users = []
+                for reaction in msg.reactions:
+                    if str(reaction.emoji) == "🎉":
+                        async for user in reaction.users():
+                            if not user.bot:
+                                users.append(user)
+                        break
+                if users:
+                    winner = random.choice(users)
+                    await channel.send(embed=success_embed("Giveaway Ended!", f"Congratulations {winner.mention}! You won the **{prize}**!"))
+                else:
+                    await channel.send(embed=info_embed("Giveaway Ended", f"Giveaway for **{prize}** ended, but no valid entries were found."))
+            except Exception:
+                pass
+
+    @tasks.loop(minutes=1)
+    async def background_tempban_loop(self):
+        current_time = time.time()
+        rows = await db_controller.fetchall("SELECT guild_id, target_id FROM temporary_bans WHERE expiry_timestamp <= ?", (current_time,))
+        for row in rows:
+            guild_id, target_id = row
+            guild = self.get_guild(guild_id)
+            if guild:
+                try:
+                    await guild.unban(discord.Object(id=target_id), reason="Temporary ban expired.")
+                except Exception:
+                    pass
+            await db_controller.execute("DELETE FROM temporary_bans WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
 
     async def setup_hook(self):
         await db_controller.initialize_database()
         
-        # Stap 1: Bij het opstarten eerst alleen SPRITEGG UPDATING zichtbaar maken
+        # Step 1: Make only SPRITEGG UPDATING visible upon startup
         await self.set_status('updating')
 
         self.background_giveaway_loop.start()
@@ -455,7 +499,7 @@ class ExtendedBotClient(commands.Bot):
     async def on_ready(self):
         print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
         
-        # Stap 2: Zodra on_ready() volledig is uitgevoerd, alleen SPRITEGG ONLINE zichtbaar maken
+        # Step 2: Once on_ready() has fully executed, make only SPRITEGG ONLINE visible
         await self.set_status('online')
 
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
@@ -606,4 +650,32 @@ class ExtendedBotClient(commands.Bot):
             message.guild, 
             warning_embed(
                 "Message Deleted", 
-                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}
+                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}```"
+            )
+        )
+
+# --- WEB APP FOR RENDER HEALTH CHECK ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running and healthy!")
+
+async def start_web_server(client: ExtendedBotClient):
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
+    await site.start()
+    print(f"Web server started on port {WEB_PORT}")
+
+async def main():
+    client = ExtendedBotClient()
+    await asyncio.gather(
+        start_web_server(client),
+        client.start(BOT_TOKEN)
+    )
+
+if __name__ == "__main__":
+    if not BOT_TOKEN:
+        print("Error: DISCORD_TOKEN is missing in the environment variables.")
+    else:
+        asyncio.run(main())
