@@ -432,12 +432,13 @@ class ExtendedBotClient(commands.Bot):
         if not message.guild or message.author.bot:
             return
         content_txt = message.content or "[No text data available]"
-        description = (
-            f"**Author:** {message.author.mention}\n"
-            f"**Channel:** {message.channel.mention}\n"
-            f"**Content:**\n```{content_txt[:900]}```"
+        await dispatch_audit_log(
+            message.guild, 
+            warning_embed(
+                "Message Deleted", 
+                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}```"
+            )
         )
-        await dispatch_audit_log(message.guild, warning_embed("Message Deleted", description))
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if not before.guild or before.author.bot or before.content == after.content:
@@ -446,14 +447,11 @@ class ExtendedBotClient(commands.Bot):
         before_text = before.content or "[No text data available]"
         after_text = after.content or "[No text data available]"
         
-        description = (
-            f"**Author:** {before.author.mention}\n"
-            f"**Channel:** {before.channel.mention}\n"
-            f"**Before:**\n```{before_text[:900]}```\n"
-            f"**After:**\n```{after_text[:900]}```"
+        embed = make_embed(
+            "Message Edited", 
+            f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n**Before:**\n```{before_text[:900]}```\n**After:**\n```{after_text[:900]}```", 
+            COLOR_WARNING
         )
-        
-        embed = make_embed("Message Edited", description, COLOR_WARNING)
         await dispatch_audit_log(before.guild, embed)
 
     async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
