@@ -13,17 +13,14 @@ from discord.ext import commands, tasks
 import aiosqlite
 from aiohttp import web
 from dotenv import load_dotenv
-from google import genai
+from groq import Groq
 
 load_dotenv()
 
-# =====================================================================
-# CONFIGURATION & ENVIRONMENT SETUP
-# =====================================================================
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_NAME = os.getenv("DATABASE_PATH", "bot.db")
 WEB_PORT = int(os.getenv("PORT", 10000))
-GEMINI_API_SECRET = os.getenv("GEMINI_API_KEY")
+GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
 
 COLOR_NEUTRAL = 0x2B2D31
 COLOR_SUCCESS = 0x2ECC71
@@ -32,53 +29,38 @@ COLOR_DANGER = 0xE74C3C
 COLOR_INFO = 0x3498DB
 COLOR_PURPLE = 0x9B59B6
 
-# Initialize Gemini Client safely with advanced safety fallbacks
-gemini_api_client = None
-if GEMINI_API_SECRET:
+groq_api_client = None
+if GROQ_API_SECRET:
     try:
-        gemini_api_client = genai.Client(api_key=GEMINI_API_SECRET)
+        groq_api_client = Groq(api_key=GROQ_API_SECRET)
     except Exception as initialization_exception:
-        print(f"Failed to initialize Gemini client: {initialization_exception}")
+        print(f"Failed to initialize Groq client: {initialization_exception}")
 
-# In-memory stores for active features & cooldowns
 sticky_messages = {}
 user_cooldowns = {}
 
-# =====================================================================
-# EMBED UTILITY FACTORY
-# =====================================================================
 def make_embed(title: str, description: str, color: int = COLOR_NEUTRAL) -> discord.Embed:
-    """Constructs a standardized base embed container with automatic timestamp."""
     embed_instance = discord.Embed(title=title, description=description, color=color)
     embed_instance.timestamp = datetime.datetime.now(datetime.timezone.utc)
     return embed_instance
 
 def success_embed(title: str, description: str) -> discord.Embed:
-    """Constructs a success status embed."""
     return make_embed(f"✔ {title}", description, COLOR_SUCCESS)
 
 def error_embed(title: str, description: str) -> discord.Embed:
-    """Constructs an error alert embed."""
     return make_embed(f"✖ {title}", description, COLOR_DANGER)
 
 def warning_embed(title: str, description: str) -> discord.Embed:
-    """Constructs a warning status embed."""
     return make_embed(f"⚠ {title}", description, COLOR_WARNING)
 
 def info_embed(title: str, description: str) -> discord.Embed:
-    """Constructs an information status embed."""
     return make_embed(f"ℹ {title}", description, COLOR_INFO)
 
-# =====================================================================
-# ADVANCED DATABASE CONTROLLER LAYER
-# =====================================================================
 class DatabaseController:
-    """Manages all asynchronous SQLite database interactions and schema bootstrapping."""
     def __init__(self, db_path: str = DATABASE_NAME):
         self.db_path = db_path
 
     async def initialize_database(self):
-        """Creates all necessary relational tables if they do not already exist."""
         async with aiosqlite.connect(self.db_path) as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS warning_records (
@@ -136,31 +118,24 @@ class DatabaseController:
             await conn.commit()
 
     async def execute(self, query: str, params: tuple = ()):
-        """Executes a modification query against the database safely."""
         async with aiosqlite.connect(self.db_path) as conn:
             cursor = await conn.execute(query, params)
             await conn.commit()
             return cursor
 
     async def fetchone(self, query: str, params: tuple = ()):
-        """Fetches a single row from the database safely."""
         async with aiosqlite.connect(self.db_path) as conn:
             async with conn.execute(query, params) as cursor:
                 return await cursor.fetchone()
 
     async def fetchall(self, query: str, params: tuple = ()):
-        """Fetches multiple rows from the database safely."""
         async with aiosqlite.connect(self.db_path) as conn:
             async with conn.execute(query, params) as cursor:
                 return await cursor.fetchall()
 
 db_controller = DatabaseController()
 
-# =====================================================================
-# AUDIT LOG DISPATCHER HELPER
-# =====================================================================
 async def dispatch_audit_log(guild: discord.Guild, embed: discord.Embed):
-    """Dispatches operational logs to the designated server audit channel securely."""
     if not guild:
         return
     res = await db_controller.fetchone("SELECT log_channel_id FROM server_settings WHERE guild_id = ?", (guild.id,))
@@ -172,11 +147,7 @@ async def dispatch_audit_log(guild: discord.Guild, embed: discord.Embed):
             except Exception:
                 pass
 
-# =====================================================================
-# CORE BOT CLIENT IMPLEMENTATION
-# =====================================================================
 class ExtendedBotClient(commands.Bot):
-    """Main application client encapsulating event handlers, filters, and background loops."""
     def __init__(self):
         intents = discord.Intents.default()
         intents.guilds = True
@@ -190,14 +161,9 @@ class ExtendedBotClient(commands.Bot):
         self.server_invite_cache = {}
 
     async def setup_hook(self):
-        """Asynchronous initialization routine for background tasks and command tree synchronization."""
         await db_controller.initialize_database()
         self.background_giveaway_loop.start()
         self.background_tempban_loop.start()
-        
-        # =====================================================================
-        # SLASH COMMANDS REGISTRATION (GROUPS & COMMANDS)
-        # =====================================================================
 
         vouch_group = app_commands.Group(name="vouch", description="Manage and view trade vouches.")
 
@@ -251,7 +217,6 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-            """Global error handler for all app/slash commands."""
             embed = error_embed("Command Error", str(error))
             if interaction.response.is_done():
                 await interaction.followup.send(embed=embed, ephemeral=True)
@@ -449,7 +414,6 @@ class ExtendedBotClient(commands.Bot):
         print("Slash commands synced.")
 
     async def on_ready(self):
-        """Fires when the bot establishes connection and completes initialization."""
         print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
         for guild in self.guilds:
@@ -459,17 +423,15 @@ class ExtendedBotClient(commands.Bot):
                 pass
 
     async def on_message(self, message: discord.Message):
-        """Comprehensive message event listener handling AI interactions, cooldowns, automod, and sticky posts."""
         if message.author.bot or not message.guild:
             return
 
-        # 1. Gemini AI Integration Handler + Cooldown Management (5s)
         if self.user.mentioned_in(message) and not message.mention_everyone:
             current_time = time.time()
             last_used = user_cooldowns.get(message.author.id, 0)
             if current_time - last_used < 5:
                 remaining = int(5 - (current_time - last_used))
-                return await message.reply(f"Please wait {remaining} more seconds before using Gemini AI again.", delete_after=5)
+                return await message.reply(f"Please wait {remaining} more seconds before using AI again.", delete_after=5)
             
             user_cooldowns[message.author.id] = current_time
             clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
@@ -478,27 +440,32 @@ class ExtendedBotClient(commands.Bot):
                 return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your queries today?")
 
             async with message.channel.typing():
-                if gemini_api_client:
+                if groq_api_client:
                     try:
-                        ai_response = gemini_api_client.models.generate_content(
-                            model="gemini-2.0-flash",
-                            contents=clean_text
+                        chat_completion = groq_api_client.chat.completions.create(
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": clean_text,
+                                }
+                            ],
+                            model="llama-3.3-70b-versatile",
                         )
-                        if not ai_response.text:
-                            await message.reply("Gemini returned an empty response.")
+                        reply_text = chat_completion.choices[0].message.content
+                        if not reply_text:
+                            await message.reply("Groq returned an empty response.")
                         else:
-                            await message.reply(ai_response.text[:1900])
+                            await message.reply(reply_text[:1900])
                     except Exception as err:
                         traceback.print_exc()
                         err_msg = str(err)
-                        if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        if "429" in err_msg or "rate_limit" in err_msg.lower():
                             await message.reply("API rate limit reached. Please try your request again shortly.")
                         else:
                             await message.reply(f"AI error encountered: `{type(err).__name__}`")
                 else:
-                    await message.reply("Gemini API key is not configured.")
+                    await message.reply("Groq API key is not configured.")
 
-        # 2. Advanced Automod Filter Suite (Invite Links & Caps)
         settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (message.guild.id,))
         if settings and settings[0] and not message.author.guild_permissions.manage_messages:
             if self.invite_link_regex.search(message.content):
@@ -511,7 +478,6 @@ class ExtendedBotClient(commands.Bot):
                 await dispatch_audit_log(message.guild, warning_embed("Automod Action Triggered", f"Removed uppercase text spam sent by {message.author.mention} in {message.channel.mention}."))
                 return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, please avoid excessive capitalization."), delete_after=5)
 
-        # 3. Sticky Messages Handler
         if message.channel.id in sticky_messages:
             sticky_data = sticky_messages[message.channel.id]
             if sticky_data.get("message_id"):
@@ -525,9 +491,6 @@ class ExtendedBotClient(commands.Bot):
 
         await self.process_commands(message)
 
-    # =====================================================================
-    # EXTENSIVE AUDIT LOGGING EVENT LISTENERS
-    # =====================================================================
     async def on_member_join(self, member: discord.Member):
         guild = member.guild
         used_invite = None
@@ -650,12 +613,8 @@ class ExtendedBotClient(commands.Bot):
                 except Exception:
                     pass
 
-    # =====================================================================
-    # BACKGROUND MAINTENANCE TASKS
-    # =====================================================================
     @tasks.loop(seconds=30)
     async def background_giveaway_loop(self):
-        """Monitors and processes concluded giveaways automatically."""
         current_time = time.time()
         expired_giveaways = await db_controller.fetchall(
             "SELECT message_id, channel_id, guild_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0",
@@ -697,7 +656,6 @@ class ExtendedBotClient(commands.Bot):
 
     @tasks.loop(seconds=30)
     async def background_tempban_loop(self):
-        """Monitors and revokes expired temporary server bans automatically."""
         current_time = time.time()
         expired_bans = await db_controller.fetchall(
             "SELECT guild_id, target_id FROM temporary_bans WHERE expiry_timestamp <= ?",
@@ -720,9 +678,6 @@ class ExtendedBotClient(commands.Bot):
     async def before_tempban_loop(self):
         await self.wait_until_ready()
 
-# =====================================================================
-# WEB SERVER FOR RENDER HEALTH CHECKS
-# =====================================================================
 async def handle_health_check(request):
     return web.Response(text="Bot is operational and healthy!", status=200)
 
@@ -734,13 +689,8 @@ async def start_web_server(client: ExtendedBotClient):
     site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
     await site.start()
 
-# =====================================================================
-# BOT EXECUTION ENTRYPOINT
-# =====================================================================
 async def main():
     bot_client = ExtendedBotClient()
-    
-    # Start the web server concurrently alongside the bot run loop (vital for Render)
     await start_web_server(bot_client)
     
     if not BOT_TOKEN:
