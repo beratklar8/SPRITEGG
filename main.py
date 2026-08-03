@@ -447,4 +447,6 @@ class ExtendedBotClient(commands.Bot):
         before_text = before.content or "[No text data available]"
         after_text = after.content or "[No text data available]"
         
-        embed = make_embed("Message Edited", f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n**Before:**\n```{before_text[:900]}
+        embed = make_embed(
+            "Message Edited", 
+            f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n**Before:**\n```{before_text[:900]}
