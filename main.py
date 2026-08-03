@@ -432,13 +432,12 @@ class ExtendedBotClient(commands.Bot):
         if not message.guild or message.author.bot:
             return
         content_txt = message.content or "[No text data available]"
-        await dispatch_audit_log(
-            message.guild, 
-            warning_embed(
-                "Message Deleted", 
-                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}```"
-            )
+        description = (
+            f"**Author:** {message.author.mention}\n"
+            f"**Channel:** {message.channel.mention}\n"
+            f"**Content:**\n```{content_txt[:900]}```"
         )
+        await dispatch_audit_log(message.guild, warning_embed("Message Deleted", description))
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if not before.guild or before.author.bot or before.content == after.content:
@@ -447,6 +446,149 @@ class ExtendedBotClient(commands.Bot):
         before_text = before.content or "[No text data available]"
         after_text = after.content or "[No text data available]"
         
-        embed = make_embed(
-            "Message Edited", 
-            f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n**Before:**\n```{before_text[:900]}
+        description = (
+            f"**Author:** {before.author.mention}\n"
+            f"**Channel:** {before.channel.mention}\n"
+            f"**Before:**\n```{before_text[:900]}```\n"
+            f"**After:**\n```{after_text[:900]}```"
+        )
+        
+        embed = make_embed("Message Edited", description, COLOR_WARNING)
+        await dispatch_audit_log(before.guild, embed)
+
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
+        if user.bot:
+            return
+        
+        res = await db_controller.fetchone(
+            "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
+            (reaction.message.id, str(reaction.emoji))
+        )
+        if res:
+            role = reaction.message.guild.get_role(res[0])
+            member = reaction.message.guild.get_member(user.id)
+            if role and member:
+                try:
+                    await member.add_roles(role, reason="Reaction Role Assignment")
+                except Exception:
+                    pass
+
+    async def on_reaction_remove(self, reaction: discord.Reaction, user: discord.User):
+        if user.bot:
+            return
+        
+        res = await db_controller.fetchone(
+            "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
+            (reaction.message.id, str(reaction.emoji))
+        )
+        if res:
+            role = reaction.message.guild.get_role(res[0])
+            member = reaction.message.guild.get_member(user.id)
+            if role and member:
+                try:
+                    await member.remove_roles(role, reason="Reaction Role Revocation")
+                except Exception:
+                    pass
+
+    # =====================================================================
+    # BACKGROUND MAINTENANCE TASKS
+    # =====================================================================
+    @tasks.loop(seconds=30)
+    async def background_giveaway_loop(self):
+        """Monitors and processes concluded giveaways automatically."""
+        current_time = time.time()
+        expired_giveaways = await db_controller.fetchall(
+            "SELECT message_id, channel_id, guild_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0",
+            (current_time,)
+        )
+
+        for g in expired_giveaways:
+            msg_id, chan_id, guild_id, prize = g
+            await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
+            
+            guild = self.get_guild(guild_id)
+            if not guild:
+                continue
+            channel = guild.get_channel(chan_id)
+            if not channel:
+                continue
+
+            try:
+                msg = await channel.fetch_message(msg_id)
+            except Exception:
+                continue
+
+            winner = None
+            for reaction in msg.reactions:
+                if str(reaction.emoji) == "🎉":
+                    users = [u async for u in reaction.users() if not u.bot]
+                    if users:
+                        winner = random.choice(users)
+                    break
+
+            if winner:
+                await channel.send(embed=success_embed("Giveaway Concluded!", f"Congratulations {winner.mention}! You won **{prize}**!"))
+            else:
+                await channel.send(embed=warning_embed("Giveaway Concluded", f"The giveaway for **{prize}** ended, but no valid entries were recorded."))
+
+    @background_giveaway_loop.before_loop
+    async def before_giveaway_loop(self):
+        await self.wait_until_ready()
+
+    @tasks.loop(seconds=30)
+    async def background_tempban_loop(self):
+        """Monitors and revokes expired temporary server bans automatically."""
+        current_time = time.time()
+        expired_bans = await db_controller.fetchall(
+            "SELECT guild_id, target_id FROM temporary_bans WHERE expiry_timestamp <= ?",
+            (current_time,)
+        )
+
+        for b in expired_bans:
+            guild_id, target_id = b
+            guild = self.get_guild(guild_id)
+            if guild:
+                try:
+                    user = discord.Object(id=target_id)
+                    await guild.unban(user, reason="Temporary ban period expired.")
+                    await dispatch_audit_log(guild, success_embed("Temporary Ban Expired", f"User ID `{target_id}` has been automatically unbanned."))
+                except Exception:
+                    pass
+            await db_controller.execute("DELETE FROM temporary_bans WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
+
+    @background_tempban_loop.before_loop
+    async def before_tempban_loop(self):
+        await self.wait_until_ready()
+
+# =====================================================================
+# WEB SERVER FOR RENDER HEALTH CHECKS
+# =====================================================================
+async def handle_health_check(request):
+    return web.Response(text="Bot is operational and healthy!", status=200)
+
+async def start_web_server(client: ExtendedBotClient):
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
+    await site.start()
+
+# =====================================================================
+# BOT EXECUTION ENTRYPOINT
+# =====================================================================
+async def main():
+    bot_client = ExtendedBotClient()
+    
+    # Start the web server concurrently alongside the bot run loop (vital for Render)
+    await start_web_server(bot_client)
+    
+    if not BOT_TOKEN:
+        print("Error: DISCORD_TOKEN is missing from environment variables.")
+        return
+
+    async with bot_client:
+        await bot_client.start(BOT_TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())
