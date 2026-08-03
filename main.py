@@ -432,4 +432,19 @@ class ExtendedBotClient(commands.Bot):
         if not message.guild or message.author.bot:
             return
         content_txt = message.content or "[No text data available]"
-        await dispatch_audit_log(message.guild, warning_embed("Message Deleted", f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}
+        await dispatch_audit_log(
+            message.guild, 
+            warning_embed(
+                "Message Deleted", 
+                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}```"
+            )
+        )
+
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        if not before.guild or before.author.bot or before.content == after.content:
+            return
+        
+        before_text = before.content or "[No text data available]"
+        after_text = after.content or "[No text data available]"
+        
+        embed = make_embed("Message Edited", f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n**Before:**\n```{before_text[:900]}
