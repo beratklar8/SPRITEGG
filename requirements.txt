@@ -1,5 +1,5 @@
-discord.py>=2.4.0
-aiohttp
+discord.py
 aiosqlite
+aiohttp
 python-dotenv
-google-genai
+groq
