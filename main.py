@@ -123,6 +123,16 @@ class DatabaseController:
                     PRIMARY KEY (message_id, emoji_icon)
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_vouches (
+                    guild_id INTEGER,
+                    target_id INTEGER,
+                    giver_id INTEGER,
+                    reason TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, target_id, giver_id)
+                )
+            """)
             await conn.commit()
 
     async def execute(self, query: str, params: tuple = ()):
@@ -186,8 +196,55 @@ class ExtendedBotClient(commands.Bot):
         self.background_tempban_loop.start()
         
         # =====================================================================
-        # SLASH COMMANDS REGISTRATION
+        # SLASH COMMANDS REGISTRATION (GROUPS & COMMANDS)
         # =====================================================================
+
+        vouch_group = app_commands.Group(name="vouch", description="Manage and view trade vouches.")
+
+        @vouch_group.command(name="give", description="Vouch for someone you traded with.")
+        async def vouch_give(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "No reason provided"):
+            if user.id == interaction.user.id:
+                return await interaction.response.send_message(embed=error_embed("Vouch Error", "You cannot vouch for yourself."), ephemeral=True)
+            if user.bot:
+                return await interaction.response.send_message(embed=error_embed("Vouch Error", "You cannot vouch for a bot."), ephemeral=True)
+
+            try:
+                await db_controller.execute(
+                    "INSERT INTO user_vouches (guild_id, target_id, giver_id, reason) VALUES (?, ?, ?, ?)",
+                    (interaction.guild.id, user.id, interaction.user.id, reason)
+                )
+            except aiosqlite.IntegrityError:
+                return await interaction.response.send_message(embed=error_embed("Already Vouched", f"You have already vouched for {user.mention} in this server."), ephemeral=True)
+
+            res = await db_controller.fetchone(
+                "SELECT COUNT(*) FROM user_vouches WHERE guild_id = ? AND target_id = ?",
+                (interaction.guild.id, user.id)
+            )
+            total_vouches = res[0] if res else 1
+
+            await interaction.response.send_message(
+                embed=success_embed("Vouch Registered", f"✔ {interaction.user.mention} vouched for {user.mention}! They now have **{total_vouches}** vouch{'es' if total_vouches != 1 else ''}.")
+            )
+
+        @vouch_group.command(name="leaderboard", description="View the top vouched users in the server.")
+        async def vouch_leaderboard(interaction: discord.Interaction):
+            rows = await db_controller.fetchall(
+                "SELECT target_id, COUNT(*) as cnt FROM user_vouches WHERE guild_id = ? GROUP BY target_id ORDER BY cnt DESC LIMIT 10",
+                (interaction.guild.id,)
+            )
+            if not rows:
+                return await interaction.response.send_message(embed=info_embed("Vouch Leaderboard", "No vouches have been recorded in this server yet."), ephemeral=True)
+
+            medals = ["🥇", "🥈", "🥉"]
+            desc = ""
+            for index, (target_id, count) in enumerate(rows):
+                prefix = medals[index] if index < 3 else f"`{index + 1}.`"
+                desc += f"{prefix} <@{target_id}> — **{count}** vouch{'es' if count != 1 else ''}\n"
+
+            embed = make_embed("🏆 Vouch Leaderboard", desc, COLOR_PURPLE)
+            await interaction.response.send_message(embed=embed)
+
+        self.tree.add_command(vouch_group)
 
         @self.tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
