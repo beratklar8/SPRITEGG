@@ -22,6 +22,11 @@ DATABASE_NAME = os.getenv("DATABASE_PATH", "bot.db")
 WEB_PORT = int(os.getenv("PORT", 10000))
 GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
 
+# --- CONFIGURATIE VOOR STATUS KANALEN ---
+CHANNEL_ONLINE_ID = 1533920905258995905   # 🟢 SPRITEGG ONLINE
+CHANNEL_UPDATING_ID = 1533921928224702685 # 🔵 SPRITEGG UPDATING
+CHANNEL_OFFLINE_ID = 1533922000005894224  # 🔴 SPRITEGG OFFLINE
+
 COLOR_NEUTRAL = 0x2B2D31
 COLOR_SUCCESS = 0x2ECC71
 COLOR_WARNING = 0xF1C40F
@@ -160,8 +165,42 @@ class ExtendedBotClient(commands.Bot):
         self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
         self.server_invite_cache = {}
 
+    async def set_status(self, status: str):
+        """
+        Beheert de zichtbaarheid van de statuskanalen op basis van de opgegeven status.
+        status kan zijn: 'online', 'updating', of 'offline'
+        """
+        channel_mapping = {
+            'online': (CHANNEL_ONLINE_ID, CHANNEL_UPDATING_ID, CHANNEL_OFFLINE_ID),
+            'updating': (CHANNEL_UPDATING_ID, CHANNEL_ONLINE_ID, CHANNEL_OFFLINE_ID),
+            'offline': (CHANNEL_OFFLINE_ID, CHANNEL_ONLINE_ID, CHANNEL_UPDATING_ID)
+        }
+
+        if status not in channel_mapping:
+            return
+
+        show_id, hide_id_1, hide_id_2 = channel_mapping[status]
+        target_ids = {show_id: True, hide_id_1: False, hide_id_2: False}
+
+        for chan_id, should_be_visible in target_ids.items():
+            if not chan_id:
+                continue
+            channel = self.get_channel(chan_id)
+            if channel and isinstance(channel, discord.VoiceChannel):
+                try:
+                    current_overwrite = channel.overwrites_for(channel.guild.default_role)
+                    if current_overwrite.view_channel != should_be_visible:
+                        current_overwrite.view_channel = should_be_visible
+                        await channel.set_permissions(channel.guild.default_role, overwrite=current_overwrite)
+                except Exception as e:
+                    print(f"Kon zichtbaarheid van kanaal {chan_id} niet wijzigen: {e}")
+
     async def setup_hook(self):
         await db_controller.initialize_database()
+        
+        # Stap 1: Bij het opstarten eerst alleen SPRITEGG UPDATING zichtbaar maken
+        await self.set_status('updating')
+
         self.background_giveaway_loop.start()
         self.background_tempban_loop.start()
 
@@ -415,6 +454,10 @@ class ExtendedBotClient(commands.Bot):
 
     async def on_ready(self):
         print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
+        
+        # Stap 2: Zodra on_ready() volledig is uitgevoerd, alleen SPRITEGG ONLINE zichtbaar maken
+        await self.set_status('online')
+
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
         for guild in self.guilds:
             try:
@@ -563,142 +606,4 @@ class ExtendedBotClient(commands.Bot):
             message.guild, 
             warning_embed(
                 "Message Deleted", 
-                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}```"
-            )
-        )
-
-    async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        if not before.guild or before.author.bot or before.content == after.content:
-            return
-        
-        before_text = before.content or "[No text data available]"
-        after_text = after.content or "[No text data available]"
-        
-        embed = make_embed(
-            "Message Edited", 
-            f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n**Before:**\n```{before_text[:900]}```\n**After:**\n```{after_text[:900]}```", 
-            COLOR_WARNING
-        )
-        await dispatch_audit_log(before.guild, embed)
-
-    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
-        if user.bot:
-            return
-        res = await db_controller.fetchone(
-            "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
-            (reaction.message.id, str(reaction.emoji))
-        )
-        if res:
-            role = reaction.message.guild.get_role(res[0])
-            member = reaction.message.guild.get_member(user.id)
-            if role and member:
-                try:
-                    await member.add_roles(role, reason="Reaction Role Assignment")
-                except Exception:
-                    pass
-
-    async def on_reaction_remove(self, reaction: discord.Reaction, user: discord.User):
-        if user.bot:
-            return
-        res = await db_controller.fetchone(
-            "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
-            (reaction.message.id, str(reaction.emoji))
-        )
-        if res:
-            role = reaction.message.guild.get_role(res[0])
-            member = reaction.message.guild.get_member(user.id)
-            if role and member:
-                try:
-                    await member.remove_roles(role, reason="Reaction Role Revocation")
-                except Exception:
-                    pass
-
-    @tasks.loop(seconds=30)
-    async def background_giveaway_loop(self):
-        current_time = time.time()
-        expired_giveaways = await db_controller.fetchall(
-            "SELECT message_id, channel_id, guild_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0",
-            (current_time,)
-        )
-
-        for g in expired_giveaways:
-            msg_id, chan_id, guild_id, prize = g
-            await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
-            
-            guild = self.get_guild(guild_id)
-            if not guild:
-                continue
-            channel = guild.get_channel(chan_id)
-            if not channel:
-                continue
-
-            try:
-                msg = await channel.fetch_message(msg_id)
-            except Exception:
-                continue
-
-            winner = None
-            for reaction in msg.reactions:
-                if str(reaction.emoji) == "🎉":
-                    users = [u async for u in reaction.users() if not u.bot]
-                    if users:
-                        winner = random.choice(users)
-                    break
-
-            if winner:
-                await channel.send(embed=success_embed("Giveaway Concluded!", f"Congratulations {winner.mention}! You won **{prize}**!"))
-            else:
-                await channel.send(embed=warning_embed("Giveaway Concluded", f"The giveaway for **{prize}** ended, but no valid entries were recorded."))
-
-    @background_giveaway_loop.before_loop
-    async def before_giveaway_loop(self):
-        await self.wait_until_ready()
-
-    @tasks.loop(seconds=30)
-    async def background_tempban_loop(self):
-        current_time = time.time()
-        expired_bans = await db_controller.fetchall(
-            "SELECT guild_id, target_id FROM temporary_bans WHERE expiry_timestamp <= ?",
-            (current_time,)
-        )
-
-        for b in expired_bans:
-            guild_id, target_id = b
-            guild = self.get_guild(guild_id)
-            if guild:
-                try:
-                    user = discord.Object(id=target_id)
-                    await guild.unban(user, reason="Temporary ban period expired.")
-                    await dispatch_audit_log(guild, success_embed("Temporary Ban Expired", f"User ID `{target_id}` has been automatically unbanned."))
-                except Exception:
-                    pass
-            await db_controller.execute("DELETE FROM temporary_bans WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
-
-    @background_tempban_loop.before_loop
-    async def before_tempban_loop(self):
-        await self.wait_until_ready()
-
-async def handle_health_check(request):
-    return web.Response(text="Bot is operational and healthy!", status=200)
-
-async def start_web_server(client: ExtendedBotClient):
-    app = web.Application()
-    app.router.add_get("/", handle_health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
-    await site.start()
-
-async def main():
-    bot_client = ExtendedBotClient()
-    await start_web_server(bot_client)
-    
-    if not BOT_TOKEN:
-        print("Error: DISCORD_TOKEN is missing from environment variables.")
-        return
-
-    async with bot_client:
-        await bot_client.start(BOT_TOKEN)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}
