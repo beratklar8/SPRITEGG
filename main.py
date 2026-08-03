@@ -21,8 +21,8 @@ load_dotenv()
 # CONFIGURATION & ENVIRONMENT SETUP
 # =====================================================================
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
-DATABASE_NAME = os.getenv("DATABASE_PATH", "bot_production_v4.db")
-WEB_PORT = int(os.getenv("PORT", 8080))
+DATABASE_NAME = os.getenv("DATABASE_PATH", "bot.db")
+WEB_PORT = int(os.getenv("PORT", 10000))
 GEMINI_API_SECRET = os.getenv("GEMINI_API_KEY")
 
 COLOR_NEUTRAL = 0x2B2D31
@@ -40,7 +40,7 @@ if GEMINI_API_SECRET:
     except Exception as initialization_exception:
         print(f"Failed to initialize Gemini client: {initialization_exception}")
 
-# In-memory stores for active features
+# In-memory stores for active features & cooldowns
 sticky_messages = {}
 user_cooldowns = {}
 
@@ -169,12 +169,11 @@ class ExtendedBotClient(commands.Bot):
     """Main application client encapsulating event handlers, filters, and background loops."""
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
-        intents.members = True
-        intents.reactions = True
         intents.guilds = True
+        intents.members = True
+        intents.message_content = True
+        intents.guild_messages = True
         intents.voice_states = True
-        intents.invites = True
         super().__init__(command_prefix="!", intents=intents)
         
         self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
@@ -186,7 +185,19 @@ class ExtendedBotClient(commands.Bot):
         self.background_giveaway_loop.start()
         self.background_tempban_loop.start()
         
-        # Load Moderation, Giveaway, Sticky & Reaction Role Commands
+        # =====================================================================
+        # SLASH COMMANDS REGISTRATION
+        # =====================================================================
+
+        @self.tree.error
+        async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            """Global error handler for all app/slash commands."""
+            embed = error_embed("Command Error", str(error))
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+
         @self.tree.command(name="ban", description="Ban a member from the server.")
         @app_commands.default_permissions(ban_members=True)
         async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
@@ -198,6 +209,17 @@ class ExtendedBotClient(commands.Bot):
                 await dispatch_audit_log(interaction.guild, error_embed("Member Banned", f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to ban member: {e}"), ephemeral=True)
+
+        @self.tree.command(name="unban", description="Unban a user by their user ID.")
+        @app_commands.default_permissions(ban_members=True)
+        async def unban_slash(interaction: discord.Interaction, user_id: str, reason: Optional[str] = "No reason provided"):
+            try:
+                user_obj = discord.Object(id=int(user_id))
+                await interaction.guild.unban(user_obj, reason=reason)
+                await interaction.response.send_message(embed=success_embed("User Unbanned", f"Successfully unbanned user ID `{user_id}`."))
+                await dispatch_audit_log(interaction.guild, success_embed("User Unbanned", f"**User ID:** `{user_id}`\n**Moderator:** {interaction.user.mention}"))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to unban user: {e}"), ephemeral=True)
 
         @self.tree.command(name="tempban", description="Temporary ban a member from the server.")
         @app_commands.default_permissions(ban_members=True)
@@ -229,12 +251,22 @@ class ExtendedBotClient(commands.Bot):
         @app_commands.default_permissions(moderate_members=True)
         async def timeout_slash(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: Optional[str] = "No reason provided"):
             try:
-                duration = datetime.timedelta(minutes=minutes)
-                await member.timeout(duration, reason=reason)
+                until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
+                await member.timeout(until, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes."))
                 await dispatch_audit_log(interaction.guild, warning_embed("Member Timed Out", f"**Member:** {member.mention}\n**Duration:** {minutes}m\n**Moderator:** {interaction.user.mention}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to timeout member: {e}"), ephemeral=True)
+
+        @self.tree.command(name="untimeout", description="Remove timeout from a member.")
+        @app_commands.default_permissions(moderate_members=True)
+        async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
+            try:
+                await member.timeout(None, reason=reason)
+                await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Successfully removed timeout for {member.mention}."))
+                await dispatch_audit_log(interaction.guild, success_embed("Timeout Removed", f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}"))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to remove timeout: {e}"), ephemeral=True)
 
         @self.tree.command(name="purge", description="Bulk delete messages in the channel.")
         @app_commands.default_permissions(manage_messages=True)
@@ -250,16 +282,73 @@ class ExtendedBotClient(commands.Bot):
             await interaction.response.send_message(embed=success_embed("Warning Issued", f"Warned {member.mention} for: {reason}"))
             await dispatch_audit_log(interaction.guild, warning_embed("Warning Logged", f"**User:** {member.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
 
+        @self.tree.command(name="warnings", description="View all warnings for a specific member.")
+        @app_commands.default_permissions(moderate_members=True)
+        async def warnings_slash(interaction: discord.Interaction, member: discord.Member):
+            rows = await db_controller.fetchall("SELECT id, moderator_id, reason, timestamp FROM warning_records WHERE guild_id = ? AND target_id = ?", (interaction.guild.id, member.id))
+            if not rows:
+                return await interaction.response.send_message(embed=info_embed("No Warnings", f"{member.mention} has no active warnings recorded."), ephemeral=True)
+            
+            desc = f"Total warnings for {member.mention}: **{len(rows)}**\n\n"
+            for r in rows:
+                w_id, mod_id, reason, ts = r
+                desc += f"**ID:** `{w_id}` | **Mod:** <@{mod_id}> | **Time:** `{ts}`\n**Reason:** {reason}\n\n"
+            
+            await interaction.response.send_message(embed=make_embed(f"Warnings for {member.name}", desc, COLOR_WARNING), ephemeral=True)
+
+        @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds.")
+        @app_commands.default_permissions(manage_channels=True)
+        async def slowmode_slash(interaction: discord.Interaction, seconds: int):
+            try:
+                await interaction.channel.edit(slowmode_delay=seconds)
+                await interaction.response.send_message(embed=success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds."))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to update slowmode: {e}"), ephemeral=True)
+
+        @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages.")
+        @app_commands.default_permissions(manage_channels=True)
+        async def lock_slash(interaction: discord.Interaction):
+            try:
+                await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
+                await interaction.response.send_message(embed=success_embed("Channel Locked", "This channel has been locked."))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to lock channel: {e}"), ephemeral=True)
+
+        @self.tree.command(name="unlock", description="Unlock the current channel.")
+        @app_commands.default_permissions(manage_channels=True)
+        async def unlock_slash(interaction: discord.Interaction):
+            try:
+                await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
+                await interaction.response.send_message(embed=success_embed("Channel Unlocked", "This channel has been unlocked."))
+            except Exception as e:
+                await interaction.response.send_message(embed=error_embed("Error", f"Failed to unlock channel: {e}"), ephemeral=True)
+
+        @self.tree.command(name="say", description="Make the bot say something in the channel.")
+        @app_commands.default_permissions(manage_messages=True)
+        async def say_slash(interaction: discord.Interaction, message: str):
+            await interaction.response.send_message(embed=success_embed("Message Sent", "Done!"), ephemeral=True)
+            await interaction.channel.send(message)
+
+        @self.tree.command(name="embed", description="Send a custom text inside an embed.")
+        @app_commands.default_permissions(manage_messages=True)
+        async def embed_slash(interaction: discord.Interaction, title: str, description: str):
+            await interaction.response.send_message(embed=success_embed("Embed Sent", "Done!"), ephemeral=True)
+            await interaction.channel.send(embed=make_embed(title, description, COLOR_INFO))
+
         @self.tree.command(name="automod", description="Toggle or configure the AutoMod filter status.")
         @app_commands.default_permissions(administrator=True)
         async def automod_slash(interaction: discord.Interaction, status: bool):
-            await db_controller.execute("INSERT INTO server_settings (guild_id, automod_status) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET automod_status = ?", (interaction.guild.id, status, status))
+            res = await db_controller.fetchone("SELECT log_channel_id FROM server_settings WHERE guild_id = ?", (interaction.guild.id,))
+            old_log = res[0] if res else None
+            await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status, log_channel_id) VALUES (?, ?, ?)", (interaction.guild.id, status, old_log))
             await interaction.response.send_message(embed=success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`"))
 
         @self.tree.command(name="setlogchannel", description="Set the log channel for server events.")
         @app_commands.default_permissions(administrator=True)
         async def setlogchannel_slash(interaction: discord.Interaction, channel: discord.TextChannel):
-            await db_controller.execute("INSERT INTO server_settings (guild_id, log_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = ?", (interaction.guild.id, channel.id, channel.id))
+            res = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (interaction.guild.id,))
+            old_automod = res[0] if res else 0
+            await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status, log_channel_id) VALUES (?, ?, ?)", (interaction.guild.id, old_automod, channel.id))
             await interaction.response.send_message(embed=success_embed("Log Channel Configured", f"Audit logs will now be sent to {channel.mention}."))
 
         @self.tree.command(name="giveaway", description="Start a new server giveaway.")
@@ -297,6 +386,7 @@ class ExtendedBotClient(commands.Bot):
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to bind reaction role: {e}"), ephemeral=True)
 
         await self.tree.sync()
+        print("Slash commands synced.")
 
     async def on_ready(self):
         """Fires when the bot establishes connection and completes initialization."""
@@ -309,12 +399,19 @@ class ExtendedBotClient(commands.Bot):
                 pass
 
     async def on_message(self, message: discord.Message):
-        """Comprehensive message event listener handling AI interactions, automod, and sticky posts."""
+        """Comprehensive message event listener handling AI interactions, cooldowns, automod, and sticky posts."""
         if message.author.bot or not message.guild:
             return
 
-        # 1. Gemini AI Integration Handler
+        # 1. Gemini AI Integration Handler + Cooldown Management (5s)
         if self.user.mentioned_in(message) and not message.mention_everyone:
+            current_time = time.time()
+            last_used = user_cooldowns.get(message.author.id, 0)
+            if current_time - last_used < 5:
+                remaining = int(5 - (current_time - last_used))
+                return await message.reply(f"Please wait {remaining} more seconds before using Gemini AI again.", delete_after=5)
+            
+            user_cooldowns[message.author.id] = current_time
             clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
             
             if not clean_text:
@@ -327,7 +424,10 @@ class ExtendedBotClient(commands.Bot):
                             model="gemini-2.0-flash",
                             contents=clean_text
                         )
-                        await message.reply(ai_response.text[:1900])
+                        if not ai_response.text:
+                            await message.reply("Gemini returned an empty response.")
+                        else:
+                            await message.reply(ai_response.text[:1900])
                     except Exception as err:
                         traceback.print_exc()
                         err_msg = str(err)
@@ -360,6 +460,8 @@ class ExtendedBotClient(commands.Bot):
                     pass
             new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_data["text"]))
             sticky_messages[message.channel.id]["message_id"] = new_sticky.id
+
+        await self.process_commands(message)
 
     # =====================================================================
     # EXTENSIVE AUDIT LOGGING EVENT LISTENERS
