@@ -120,6 +120,16 @@ class DatabaseController:
                     PRIMARY KEY (guild_id, target_id, giver_id)
                 )
             """)
+            # --- NIEUWE TABEL VOOR SPRITE COLLECTION (OWNED / MASTERED) ---
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_sprites (
+                    user_id INTEGER,
+                    sprite_name TEXT,
+                    is_owned BOOLEAN DEFAULT 0,
+                    is_mastered BOOLEAN DEFAULT 0,
+                    PRIMARY KEY (user_id, sprite_name)
+                )
+            """)
             await conn.commit()
 
     async def execute(self, query: str, params: tuple = ()):
@@ -166,10 +176,6 @@ class ExtendedBotClient(commands.Bot):
         self.server_invite_cache = {}
 
     async def set_status(self, status: str):
-        """
-        Manages the visibility of the status channels based on the specified status.
-        status can be: 'online', 'updating', or 'offline'
-        """
         channel_mapping = {
             'online': (CHANNEL_ONLINE_ID, CHANNEL_UPDATING_ID, CHANNEL_OFFLINE_ID),
             'updating': (CHANNEL_UPDATING_ID, CHANNEL_ONLINE_ID, CHANNEL_OFFLINE_ID),
@@ -241,13 +247,12 @@ class ExtendedBotClient(commands.Bot):
 
     async def setup_hook(self):
         await db_controller.initialize_database()
-        
-        # Step 1: Make only SPRITEGG UPDATING visible upon startup
         await self.set_status('updating')
 
         self.background_giveaway_loop.start()
         self.background_tempban_loop.start()
 
+        # --- VOUCH GROUP ---
         vouch_group = app_commands.Group(name="vouch", description="Manage and view trade vouches.")
 
         @vouch_group.command(name="give", description="Vouch for someone you traded with.")
@@ -298,6 +303,69 @@ class ExtendedBotClient(commands.Bot):
 
         self.tree.add_command(vouch_group)
 
+        # --- NIEUWE SPRITE GROUP (Owned & Mastered) ---
+        sprite_group = app_commands.Group(name="sprite", description="Manage your sprite collection (Owned/Mastered).")
+
+        @sprite_group.command(name="set", description="Update your Owned or Mastered status for a sprite.")
+        @app_commands.describe(
+            sprite_name="The name of the sprite (e.g. Gummy Peely, Gold Grim)",
+            owned="Do you own this sprite?",
+            mastered="Have you mastered this sprite?"
+        )
+        async def sprite_set(interaction: discord.Interaction, sprite_name: str, owned: Optional[bool] = None, mastered: Optional[bool] = None):
+            s_name = sprite_name.strip().title()
+            
+            # Check if record already exists
+            existing = await db_controller.fetchone(
+                "SELECT is_owned, is_mastered FROM user_sprites WHERE user_id = ? AND sprite_name = ?",
+                (interaction.user.id, s_name)
+            )
+
+            if existing:
+                curr_owned, curr_mastered = existing
+                new_owned = owned if owned is not None else bool(curr_owned)
+                new_mastered = mastered if mastered is not None else bool(curr_mastered)
+                
+                await db_controller.execute(
+                    "UPDATE user_sprites SET is_owned = ?, is_mastered = ? WHERE user_id = ? AND sprite_name = ?",
+                    (int(new_owned), int(new_mastered), interaction.user.id, s_name)
+                )
+            else:
+                new_owned = owned if owned is not None else False
+                new_mastered = mastered if mastered is not None else False
+                await db_controller.execute(
+                    "INSERT INTO user_sprites (user_id, sprite_name, is_owned, is_mastered) VALUES (?, ?, ?, ?)",
+                    (interaction.user.id, s_name, int(new_owned), int(new_mastered))
+                )
+
+            embed = success_embed(
+                "Sprite Updated", 
+                f"Sprite: **{s_name}**\n📦 Owned: **{'Yes' if new_owned else 'No'}**\n👑 Mastered: **{'Yes' if new_mastered else 'No'}**"
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @sprite_group.command(name="profile", description="View your or someone else's sprite collection status.")
+        async def sprite_profile(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+            target = member or interaction.user
+            rows = await db_controller.fetchall(
+                "SELECT sprite_name, is_owned, is_mastered FROM user_sprites WHERE user_id = ?",
+                (target.id,)
+            )
+
+            if not rows:
+                return await interaction.response.send_message(embed=info_embed("Sprite Collection", f"{target.mention} has not logged any sprites yet."), ephemeral=True)
+
+            desc = ""
+            for sprite, owned, mastered in rows:
+                o_icon = "☑" if owned else "☒"
+                m_icon = "☑" if mastered else "☒"
+                desc += f"**{sprite}** — Owned: {o_icon} | Mastered: {m_icon}\n"
+
+            embed = make_embed(f"✨ Sprite Collection: {target.display_name}", desc, COLOR_PURPLE)
+            await interaction.response.send_message(embed=embed)
+
+        self.tree.add_command(sprite_group)
+
         @self.tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
             embed = error_embed("Command Error", str(error))
@@ -306,6 +374,7 @@ class ExtendedBotClient(commands.Bot):
             else:
                 await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        # --- REST VAN DE COMMANDS (Ban, Kick, Timeout, etc.) ---
         @self.tree.command(name="ban", description="Ban a member from the server.")
         @app_commands.default_permissions(ban_members=True)
         async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
@@ -498,10 +567,7 @@ class ExtendedBotClient(commands.Bot):
 
     async def on_ready(self):
         print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
-        
-        # Step 2: Once on_ready() has fully executed, make only SPRITEGG ONLINE visible
         await self.set_status('online')
-
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
         for guild in self.guilds:
             try:
@@ -654,7 +720,6 @@ class ExtendedBotClient(commands.Bot):
             )
         )
 
-# --- WEB APP FOR RENDER HEALTH CHECK ---
 async def handle_ping(request):
     return web.Response(text="Bot is running and healthy!")
 
