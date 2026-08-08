@@ -5,13 +5,13 @@ from discord.ext import commands
 from discord import app_commands
 
 class SpriteSelectView(discord.ui.View):
-    def __init__(self, sprites, user_id):
+    def __init__(self, sprites, user_id, already_owned=None):
         super().__init__(timeout=180)
         self.sprites = sprites  # List of (name, rarity)
         self.user_id = user_id
         self.current_page = 0
         self.per_page = 5
-        self.selected_sprites = set()
+        self.selected_sprites = set(already_owned) if already_owned else set()
         self.update_components()
 
     def update_components(self):
@@ -90,20 +90,37 @@ class SpriteSelectView(discord.ui.View):
         
         try:
             from main import db_controller
+            
+            # Fetch existing items already in the database for this user
+            existing_rows = await db_controller.fetchall("SELECT sprite_name FROM user_inventory WHERE user_id = ?", (self.user_id,))
+            existing_sprites = {row[0] for row in existing_rows}
+            
+            # Items selected now but not yet in the DB -> Add them
             added_count = 0
             for name in self.selected_sprites:
-                catalog_item = await db_controller.fetchone("SELECT description FROM sprites_data WHERE name = ?", (name,))
-                if catalog_item:
-                    rarity = catalog_item[0]
+                if name not in existing_sprites:
+                    catalog_item = await db_controller.fetchone("SELECT description FROM sprites_data WHERE name = ?", (name,))
+                    if catalog_item:
+                        rarity = catalog_item[0]
+                        await db_controller.execute(
+                            "INSERT OR IGNORE INTO user_inventory (user_id, sprite_name, rarity) VALUES (?, ?, ?)",
+                            (self.user_id, name, rarity)
+                        )
+                        added_count += 1
+            
+            # Items that were in the DB but deselected by the user -> Remove them
+            removed_count = 0
+            for name in existing_sprites:
+                if name not in self.selected_sprites:
                     await db_controller.execute(
-                        "INSERT OR IGNORE INTO user_inventory (user_id, sprite_name, rarity) VALUES (?, ?, ?)",
-                        (self.user_id, name, rarity)
+                        "DELETE FROM user_inventory WHERE user_id = ? AND sprite_name = ?",
+                        (self.user_id, name)
                     )
-                    added_count += 1
+                    removed_count += 1
 
             embed = discord.Embed(
                 title="✔ Selection Saved!",
-                description=f"Successfully added **{added_count}** selected sprites to your inventory!",
+                description=f"Inventory updated! Added **{added_count}** and removed **{removed_count}** sprites.",
                 color=0x2ECC71
             )
             for child in self.children:
@@ -153,9 +170,13 @@ class Sprites(commands.Cog):
                 )
                 return await interaction.response.send_message(embed=embed, ephemeral=True)
 
+            # Fetch already saved sprites for this user
+            user_rows = await db_controller.fetchall("SELECT sprite_name FROM user_inventory WHERE user_id = ?", (interaction.user.id,))
+            already_owned = [r[0] for r in user_rows]
+
             formatted_sprites = [(name, desc.replace("Rarity: ", "")) for name, desc in rows]
             
-            view = SpriteSelectView(formatted_sprites, interaction.user.id)
+            view = SpriteSelectView(formatted_sprites, interaction.user.id, already_owned=already_owned)
             embed = discord.Embed(
                 title="🎮 Sprite Selection Menu",
                 description="Click on the sprites below to select or deselect them. Use the pages to navigate and click **Done / Save** when you are finished!",
