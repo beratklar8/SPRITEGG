@@ -674,3 +674,10 @@ if __name__ == "__main__":
         print("Error: DISCORD_TOKEN is missing in the environment variables.")
     else:
         asyncio.run(main())
+await conn.execute("""
+    CREATE TABLE IF NOT EXISTS sprites_data (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE,
+        description TEXT
+    )
+""")
