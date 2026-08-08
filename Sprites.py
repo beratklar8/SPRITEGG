@@ -12,19 +12,8 @@ class Sprites(commands.Cog):
     async def seed_sprites(self):
         await self.bot.wait_until_ready()
         try:
-            from main import db_controller
+            from Main import db_controller
             
-            # Maak de user_inventory tabel aan als deze nog niet bestaat
-            await db_controller.execute("""
-                CREATE TABLE IF NOT EXISTS user_inventory (
-                    user_id INTEGER,
-                    sprite_name TEXT,
-                    rarity TEXT,
-                    PRIMARY KEY (user_id, sprite_name)
-                )
-            """)
-            
-            # Laad sprites.json in de catalogus
             if os.path.exists("sprites.json"):
                 with open("sprites.json", "r", encoding="utf-8") as f:
                     sprites_data = json.load(f)
@@ -39,20 +28,16 @@ class Sprites(commands.Cog):
                         )
                 print("Sprites successfully seeded from sprites.json!")
         except Exception as e:
-            print(f"Error while auto-seeding sprites from JSON/Inventory: {e}")
+            print(f"Error while auto-seeding sprites from JSON: {e}")
 
-    # Auto-complete functie zodat spelers kunnen kiezen uit de lijst
     async def sprite_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         try:
-            from main import db_controller
-            # Haal alle sprites op uit de database
+            from Main import db_controller
             rows = await db_controller.fetchall("SELECT name FROM sprites_data")
             sprite_names = [row[0] for row in rows]
             
-            # Filter op wat de gebruiker typt
             filtered = [name for name in sprite_names if current.lower() in name.lower()]
             
-            # Discord maximaal 25 keuzes toestaan
             return [
                 app_commands.Choice(name=name, value=name)
                 for name in filtered[:25]
@@ -60,28 +45,26 @@ class Sprites(commands.Cog):
         except Exception:
             return []
 
-    @app_commands.command(name="addsprite", description="Selecteer een sprite om toe te voegen aan je inventaris.")
+    @app_commands.command(name="addsprite", description="Select a sprite to add to your inventory.")
     @app_commands.autocomplete(sprite_name=sprite_autocomplete)
     async def addsprite(self, interaction: discord.Interaction, sprite_name: str):
         try:
-            from main import db_controller
+            from Main import db_controller
             
-            # 1. Controleer of de sprite bestaat in de catalogus
             catalog_item = await db_controller.fetchone(
                 "SELECT description FROM sprites_data WHERE name = ?", (sprite_name,)
             )
             
             if not catalog_item:
                 embed = discord.Embed(
-                    title="✖ Sprite Niet Gevonden",
-                    description=f"De sprite **'{sprite_name}'** bestaat niet. Kies er een uit de lijst of bekijk ze via `/listsprites`.",
+                    title="✖ Sprite Not Found",
+                    description=f"The sprite **'{sprite_name}'** does not exist. Choose one from the list or view them via `/listsprites`.",
                     color=0xE74C3C
                 )
                 return await interaction.response.send_message(embed=embed, ephemeral=True)
             
             rarity = catalog_item[0]
             
-            # 2. Controleer of de speler deze al heeft
             existing = await db_controller.fetchone(
                 "SELECT 1 FROM user_inventory WHERE user_id = ? AND sprite_name = ?", 
                 (interaction.user.id, sprite_name)
@@ -89,21 +72,20 @@ class Sprites(commands.Cog):
             
             if existing:
                 embed = discord.Embed(
-                    title="⚠️ Al in bezit",
-                    description=f"Je hebt **{sprite_name}** (`{rarity}`) al in je inventaris!",
+                    title="⚠️ Already Owned",
+                    description=f"You already have **{sprite_name}** (`{rarity}`) in your inventory!",
                     color=0xF1C40F
                 )
                 return await interaction.response.send_message(embed=embed, ephemeral=True)
             
-            # 3. Voeg toe aan de inventaris
             await db_controller.execute(
                 "INSERT INTO user_inventory (user_id, sprite_name, rarity) VALUES (?, ?, ?)",
                 (interaction.user.id, sprite_name, rarity)
             )
             
             embed = discord.Embed(
-                title="✔ Sprite Toegevoegd!",
-                description=f"Je hebt **{sprite_name}** (`{rarity}`) succesvol toegevoegd aan je inventaris!",
+                title="✔ Sprite Added!",
+                description=f"Successfully added **{sprite_name}** (`{rarity}`) to your inventory!",
                 color=0x2ECC71
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -111,7 +93,7 @@ class Sprites(commands.Cog):
         except Exception as e:
             embed = discord.Embed(
                 title="✖ Error",
-                description=f"Er ging iets mis: {e}",
+                description=f"An error occurred: {e}",
                 color=0xE74C3C
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -119,7 +101,7 @@ class Sprites(commands.Cog):
     @app_commands.command(name="listsprites", description="View all available sprites in the game catalog.")
     async def listsprites(self, interaction: discord.Interaction):
         try:
-            from main import db_controller
+            from Main import db_controller
             rows = await db_controller.fetchall("SELECT name, description FROM sprites_data")
             
             if not rows:
@@ -136,7 +118,7 @@ class Sprites(commands.Cog):
                 
             embed = discord.Embed(
                 title="🎮 All Available Sprites & Items",
-                description=desc + "\n*(Typ /addsprite en kies een item uit de lijst om te claimen)*",
+                description=desc + "\n*(Type /addsprite and choose an item from the list to claim)*",
                 color=0xF1C40F
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -152,13 +134,13 @@ class Sprites(commands.Cog):
     async def inventory(self, interaction: discord.Interaction, user: discord.Member = None):
         target = user or interaction.user
         try:
-            from main import db_controller
+            from Main import db_controller
             rows = await db_controller.fetchall("SELECT sprite_name, rarity FROM user_inventory WHERE user_id = ?", (target.id,))
             
             if not rows:
                 embed = discord.Embed(
                     title="🎒 Inventory Empty",
-                    description=f"{target.mention} heeft nog geen sprites in hun inventaris.",
+                    description=f"{target.mention} does not have any sprites in their inventory yet.",
                     color=0xF1C40F
                 )
                 return await interaction.response.send_message(embed=embed)
