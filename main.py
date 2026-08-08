@@ -120,6 +120,13 @@ class DatabaseController:
                     PRIMARY KEY (guild_id, target_id, giver_id)
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS sprites_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE,
+                    description TEXT
+                )
+            """)
             await conn.commit()
 
     async def execute(self, query: str, params: tuple = ()):
@@ -238,7 +245,6 @@ class ExtendedBotClient(commands.Bot):
     async def setup_hook(self):
         await db_controller.initialize_database()
         
-        # Load the Sprites cog
         await self.load_extension("Sprites")
         print("Sprites cog successfully loaded.")
         
@@ -674,10 +680,3 @@ if __name__ == "__main__":
         print("Error: DISCORD_TOKEN is missing in the environment variables.")
     else:
         asyncio.run(main())
-await conn.execute("""
-    CREATE TABLE IF NOT EXISTS sprites_data (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT UNIQUE,
-        description TEXT
-    )
-""")
