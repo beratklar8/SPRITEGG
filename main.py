@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import random
 import asyncio
@@ -140,6 +141,25 @@ class DatabaseController:
                 )
             """)
             await conn.commit()
+
+        # Automatically load sprites from sprites.json into the database if present
+        if os.path.exists("sprites.json"):
+            try:
+                with open("sprites.json", "r", encoding="utf-8") as f:
+                    sprites_list = json.load(f)
+                    async with aiosqlite.connect(self.db_path) as conn:
+                        for sprite in sprites_list:
+                            name = sprite.get("name")
+                            rarity = sprite.get("rarity", "SPECIAL")
+                            description = f"Rarity: {rarity}"
+                            await conn.execute(
+                                "INSERT OR IGNORE INTO sprites_data (name, description) VALUES (?, ?)",
+                                (name, description)
+                            )
+                        await conn.commit()
+                print("Sprites successfully loaded from sprites.json into the database!")
+            except Exception as e:
+                print(f"Error loading sprites.json: {e}")
 
     async def execute(self, query: str, params: tuple = ()):
         async with aiosqlite.connect(self.db_path) as conn:
