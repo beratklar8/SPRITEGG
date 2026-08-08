@@ -41,27 +41,47 @@ class Sprites(commands.Cog):
         except Exception as e:
             print(f"Error while auto-seeding sprites from JSON/Inventory: {e}")
 
-    @app_commands.command(name="addsprite", description="Add a sprite from the catalog to your own inventory.")
+    # Auto-complete functie zodat spelers kunnen kiezen uit de lijst
+    async def sprite_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        try:
+            from main import db_controller
+            # Haal alle sprites op uit de database
+            rows = await db_controller.fetchall("SELECT name FROM sprites_data")
+            sprite_names = [row[0] for row in rows]
+            
+            # Filter op wat de gebruiker typt
+            filtered = [name for name in sprite_names if current.lower() in name.lower()]
+            
+            # Discord maximaal 25 keuzes toestaan
+            return [
+                app_commands.Choice(name=name, value=name)
+                for name in filtered[:25]
+            ]
+        except Exception:
+            return []
+
+    @app_commands.command(name="addsprite", description="Selecteer een sprite om toe te voegen aan je inventaris.")
+    @app_commands.autocomplete(sprite_name=sprite_autocomplete)
     async def addsprite(self, interaction: discord.Interaction, sprite_name: str):
         try:
             from main import db_controller
             
-            # 1. Controleer of de sprite überhaupt bestaat in de catalogus (sprites_data)
+            # 1. Controleer of de sprite bestaat in de catalogus
             catalog_item = await db_controller.fetchone(
                 "SELECT description FROM sprites_data WHERE name = ?", (sprite_name,)
             )
             
             if not catalog_item:
                 embed = discord.Embed(
-                    title="✖ Sprite Not Found",
-                    description=f"De sprite **'{sprite_name}'** bestaat niet in de catalogus! Bekijk alle beschikbare sprites met `/listsprites`.",
+                    title="✖ Sprite Niet Gevonden",
+                    description=f"De sprite **'{sprite_name}'** bestaat niet. Kies er een uit de lijst of bekijk ze via `/listsprites`.",
                     color=0xE74C3C
                 )
                 return await interaction.response.send_message(embed=embed, ephemeral=True)
             
-            rarity = catalog_item[0] # description in de tabel wordt gebruikt als rarity
+            rarity = catalog_item[0]
             
-            # 2. Controleer of de gebruiker deze sprite al heeft
+            # 2. Controleer of de speler deze al heeft
             existing = await db_controller.fetchone(
                 "SELECT 1 FROM user_inventory WHERE user_id = ? AND sprite_name = ?", 
                 (interaction.user.id, sprite_name)
@@ -75,7 +95,7 @@ class Sprites(commands.Cog):
                 )
                 return await interaction.response.send_message(embed=embed, ephemeral=True)
             
-            # 3. Voeg toe aan de inventaris van de gebruiker
+            # 3. Voeg toe aan de inventaris
             await db_controller.execute(
                 "INSERT INTO user_inventory (user_id, sprite_name, rarity) VALUES (?, ?, ?)",
                 (interaction.user.id, sprite_name, rarity)
@@ -91,7 +111,7 @@ class Sprites(commands.Cog):
         except Exception as e:
             embed = discord.Embed(
                 title="✖ Error",
-                description=f"Er ging iets mis bij het toevoegen van de sprite: {e}",
+                description=f"Er ging iets mis: {e}",
                 color=0xE74C3C
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -116,7 +136,7 @@ class Sprites(commands.Cog):
                 
             embed = discord.Embed(
                 title="🎮 All Available Sprites & Items",
-                description=desc + "\n*(Gebruik /addsprite [naam] om er eentje te claimen)*",
+                description=desc + "\n*(Typ /addsprite en kies een item uit de lijst om te claimen)*",
                 color=0xF1C40F
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
