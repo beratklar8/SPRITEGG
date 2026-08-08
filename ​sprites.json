@@ -1,793 +1,115 @@
 [
-  {
-    "id": "spr_john_wick",
-    "name": "John Wick",
-    "rarity": "MYTHIC",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=John+Wick"
-  },
-  {
-    "id": "spr_batman",
-    "name": "Batman",
-    "rarity": "MYTHIC",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Batman"
-  },
-  {
-    "id": "spr_cube_batman",
-    "name": "Cube Batman",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Batman"
-  },
-  {
-    "id": "spr_gold_batman",
-    "name": "Gold Batman",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Batman"
-  },
-  {
-    "id": "spr_gummy_batman",
-    "name": "Gummy Batman",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Batman"
-  },
-  {
-    "id": "spr_galaxy_batman",
-    "name": "Galaxy Batman",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Batman"
-  },
-  {
-    "id": "spr_holofoil_batman",
-    "name": "Holofoil Batman",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Batman"
-  },
-  {
-    "id": "spr_water",
-    "name": "Water",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Water"
-  },
-  {
-    "id": "spr_gold_water",
-    "name": "Gold Water",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Water"
-  },
-  {
-    "id": "spr_quack_water",
-    "name": "Quack Water",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Quack+Water"
-  },
-  {
-    "id": "spr_gummy_water",
-    "name": "Gummy Water",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Water"
-  },
-  {
-    "id": "spr_galaxy_water",
-    "name": "Galaxy Water",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Water"
-  },
-  {
-    "id": "spr_gem_water",
-    "name": "Gem Water",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gem+Water"
-  },
-  {
-    "id": "spr_holofoil_water",
-    "name": "Holofoil Water",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Water"
-  },
-  {
-    "id": "spr_earth",
-    "name": "Earth",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2ECC71/FFFFFF?text=Earth"
-  },
-  {
-    "id": "spr_cube_earth",
-    "name": "Cube Earth",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Earth"
-  },
-  {
-    "id": "spr_gold_earth",
-    "name": "Gold Earth",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Earth"
-  },
-  {
-    "id": "spr_quack_earth",
-    "name": "Quack Earth",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Quack+Earth"
-  },
-  {
-    "id": "spr_gummy_earth",
-    "name": "Gummy Earth",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Earth"
-  },
-  {
-    "id": "spr_galaxy_earth",
-    "name": "Galaxy Earth",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Earth"
-  },
-  {
-    "id": "spr_gem_earth",
-    "name": "Gem Earth",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gem+Earth"
-  },
-  {
-    "id": "spr_fire",
-    "name": "Fire",
-    "rarity": "RARE",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/E74C3C/FFFFFF?text=Fire"
-  },
-  {
-    "id": "spr_cube_fire",
-    "name": "Cube Fire",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Fire"
-  },
-  {
-    "id": "spr_gold_fire",
-    "name": "Gold Fire",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Fire"
-  },
-  {
-    "id": "spr_quack_fire",
-    "name": "Quack Fire",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Quack+Fire"
-  },
-  {
-    "id": "spr_gummy_fire",
-    "name": "Gummy Fire",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Fire"
-  },
-  {
-    "id": "spr_galaxy_fire",
-    "name": "Galaxy Fire",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Fire"
-  },
-  {
-    "id": "spr_holofoil_fire",
-    "name": "Holofoil Fire",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Fire"
-  },
-  {
-    "id": "spr_duck",
-    "name": "Duck",
-    "rarity": "EPIC",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Duck"
-  },
-  {
-    "id": "spr_gold_duck",
-    "name": "Gold Duck",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Duck"
-  },
-  {
-    "id": "spr_gummy_duck",
-    "name": "Gummy Duck",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Duck"
-  },
-  {
-    "id": "spr_galaxy_duck",
-    "name": "Galaxy Duck",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Duck"
-  },
-  {
-    "id": "spr_gem_duck",
-    "name": "Gem Duck",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gem+Duck"
-  },
-  {
-    "id": "spr_ghost",
-    "name": "Ghost",
-    "rarity": "EPIC",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Ghost"
-  },
-  {
-    "id": "spr_gold_ghost",
-    "name": "Gold Ghost",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Ghost"
-  },
-  {
-    "id": "spr_gummy_ghost",
-    "name": "Gummy Ghost",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Ghost"
-  },
-  {
-    "id": "spr_galaxy_ghost",
-    "name": "Galaxy Ghost",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Ghost"
-  },
-  {
-    "id": "spr_holofoil_ghost",
-    "name": "Holofoil Ghost",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Ghost"
-  },
-  {
-    "id": "spr_dream",
-    "name": "Dream",
-    "rarity": "LEGENDARY",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Dream"
-  },
-  {
-    "id": "spr_cube_dream",
-    "name": "Cube Dream",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Dream"
-  },
-  {
-    "id": "spr_gold_dream",
-    "name": "Gold Dream",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Dream"
-  },
-  {
-    "id": "spr_gummy_dream",
-    "name": "Gummy Dream",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Dream"
-  },
-  {
-    "id": "spr_galaxy_dream",
-    "name": "Galaxy Dream",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Dream"
-  },
-  {
-    "id": "spr_demon",
-    "name": "Demon",
-    "rarity": "EPIC",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/E74C3C/FFFFFF?text=Demon"
-  },
-  {
-    "id": "spr_punk",
-    "name": "Punk",
-    "rarity": "LEGENDARY",
-    "category": "Urban",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Punk"
-  },
-  {
-    "id": "spr_cube_punk",
-    "name": "Cube Punk",
-    "rarity": "SPECIAL",
-    "category": "Urban",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Punk"
-  },
-  {
-    "id": "spr_gold_punk",
-    "name": "Gold Punk",
-    "rarity": "SPECIAL",
-    "category": "Urban",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Punk"
-  },
-  {
-    "id": "spr_gummy_punk",
-    "name": "Gummy Punk",
-    "rarity": "SPECIAL",
-    "category": "Urban",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Punk"
-  },
-  {
-    "id": "spr_galaxy_punk",
-    "name": "Galaxy Punk",
-    "rarity": "SPECIAL",
-    "category": "Urban",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Punk"
-  },
-  {
-    "id": "spr_king",
-    "name": "King",
-    "rarity": "EPIC",
-    "category": "Royal",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=King"
-  },
-  {
-    "id": "spr_gold_king",
-    "name": "Gold King",
-    "rarity": "SPECIAL",
-    "category": "Royal",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+King"
-  },
-  {
-    "id": "spr_gummy_king",
-    "name": "Gummy King",
-    "rarity": "SPECIAL",
-    "category": "Royal",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+King"
-  },
-  {
-    "id": "spr_galaxy_king",
-    "name": "Galaxy King",
-    "rarity": "SPECIAL",
-    "category": "Royal",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+King"
-  },
-  {
-    "id": "spr_holofoil_king",
-    "name": "Holofoil King",
-    "rarity": "SPECIAL",
-    "category": "Royal",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+King"
-  },
-  {
-    "id": "spr_vini_jr",
-    "name": "Vini Jr.",
-    "rarity": "MYTHIC",
-    "category": "Icons",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Vini+Jr."
-  },
-  {
-    "id": "spr_burnt_peanut",
-    "name": "Burnt Peanut",
-    "rarity": "MYTHIC",
-    "category": "Food",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Burnt+Peanut"
-  },
-  {
-    "id": "spr_zero_point",
-    "name": "Zero Point",
-    "rarity": "MYTHIC",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Zero+Point"
-  },
-  {
-    "id": "spr_cube_zero_point",
-    "name": "Cube Zero Point",
-    "rarity": "SPECIAL",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Zero+Point"
-  },
-  {
-    "id": "spr_gold_zero_point",
-    "name": "Gold Zero Point",
-    "rarity": "SPECIAL",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Zero+Point"
-  },
-  {
-    "id": "spr_quack_zero_point",
-    "name": "Quack Zero Point",
-    "rarity": "SPECIAL",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Quack+Zero+Point"
-  },
-  {
-    "id": "spr_gummy_zero_point",
-    "name": "Gummy Zero Point",
-    "rarity": "SPECIAL",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Zero+Point"
-  },
-  {
-    "id": "spr_galaxy_zero_point",
-    "name": "Galaxy Zero Point",
-    "rarity": "SPECIAL",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Zero+Point"
-  },
-  {
-    "id": "spr_gem_zero_point",
-    "name": "Gem Zero Point",
-    "rarity": "SPECIAL",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gem+Zero+Point"
-  },
-  {
-    "id": "spr_holofoil_zero_point",
-    "name": "Holofoil Zero Point",
-    "rarity": "SPECIAL",
-    "category": "Cosmic",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Zero+Point"
-  },
-  {
-    "id": "spr_fishy",
-    "name": "Fishy",
-    "rarity": "RARE",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Fishy"
-  },
-  {
-    "id": "spr_cube_fishy",
-    "name": "Cube Fishy",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Fishy"
-  },
-  {
-    "id": "spr_gold_fishy",
-    "name": "Gold Fishy",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Fishy"
-  },
-  {
-    "id": "spr_gummy_fishy",
-    "name": "Gummy Fishy",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Fishy"
-  },
-  {
-    "id": "spr_galaxy_fishy",
-    "name": "Galaxy Fishy",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Fishy"
-  },
-  {
-    "id": "spr_striker",
-    "name": "Striker",
-    "rarity": "EPIC",
-    "category": "Action",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Striker"
-  },
-  {
-    "id": "spr_gold_striker",
-    "name": "Gold Striker",
-    "rarity": "SPECIAL",
-    "category": "Action",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Striker"
-  },
-  {
-    "id": "spr_gummy_striker",
-    "name": "Gummy Striker",
-    "rarity": "SPECIAL",
-    "category": "Action",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Striker"
-  },
-  {
-    "id": "spr_galaxy_striker",
-    "name": "Galaxy Striker",
-    "rarity": "SPECIAL",
-    "category": "Action",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Striker"
-  },
-  {
-    "id": "spr_holofoil_striker",
-    "name": "Holofoil Striker",
-    "rarity": "SPECIAL",
-    "category": "Action",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Striker"
-  },
-  {
-    "id": "spr_aura",
-    "name": "Aura",
-    "rarity": "EPIC",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Aura"
-  },
-  {
-    "id": "spr_gold_aura",
-    "name": "Gold Aura",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Aura"
-  },
-  {
-    "id": "spr_gummy_aura",
-    "name": "Gummy Aura",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Aura"
-  },
-  {
-    "id": "spr_galaxy_aura",
-    "name": "Galaxy Aura",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Aura"
-  },
-  {
-    "id": "spr_gem_aura",
-    "name": "Gem Aura",
-    "rarity": "SPECIAL",
-    "category": "Abstract",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gem+Aura"
-  },
-  {
-    "id": "spr_boss",
-    "name": "Boss",
-    "rarity": "LEGENDARY",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Boss"
-  },
-  {
-    "id": "spr_cube_boss",
-    "name": "Cube Boss",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Boss"
-  },
-  {
-    "id": "spr_gold_boss",
-    "name": "Gold Boss",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Boss"
-  },
-  {
-    "id": "spr_gummy_boss",
-    "name": "Gummy Boss",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Boss"
-  },
-  {
-    "id": "spr_galaxy_boss",
-    "name": "Galaxy Boss",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Boss"
-  },
-  {
-    "id": "spr_grim",
-    "name": "Grim",
-    "rarity": "MYTHIC",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Grim"
-  },
-  {
-    "id": "spr_cube_grim",
-    "name": "Cube Grim",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Cube+Grim"
-  },
-  {
-    "id": "spr_gold_grim",
-    "name": "Gold Grim",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Grim"
-  },
-  {
-    "id": "spr_gummy_grim",
-    "name": "Gummy Grim",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Grim"
-  },
-  {
-    "id": "spr_galaxy_grim",
-    "name": "Galaxy Grim",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Grim"
-  },
-  {
-    "id": "spr_gem_grim",
-    "name": "Gem Grim",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gem+Grim"
-  },
-  {
-    "id": "spr_holofoil_grim",
-    "name": "Holofoil Grim",
-    "rarity": "SPECIAL",
-    "category": "Spooky",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Grim"
-  },
-  {
-    "id": "spr_air",
-    "name": "Air",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Air"
-  },
-  {
-    "id": "spr_gold_air",
-    "name": "Gold Air",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Air"
-  },
-  {
-    "id": "spr_gummy_air",
-    "name": "Gummy Air",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Air"
-  },
-  {
-    "id": "spr_galaxy_air",
-    "name": "Galaxy Air",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Air"
-  },
-  {
-    "id": "spr_holofoil_air",
-    "name": "Holofoil Air",
-    "rarity": "SPECIAL",
-    "category": "Elements",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Air"
-  },
-  {
-    "id": "spr_seven",
-    "name": "Seven",
-    "rarity": "LEGENDARY",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Seven"
-  },
-  {
-    "id": "spr_gold_seven",
-    "name": "Gold Seven",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Seven"
-  },
-  {
-    "id": "spr_gummy_seven",
-    "name": "Gummy Seven",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Seven"
-  },
-  {
-    "id": "spr_galaxy_seven",
-    "name": "Galaxy Seven",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Seven"
-  },
-  {
-    "id": "spr_holofoil_seven",
-    "name": "Holofoil Seven",
-    "rarity": "SPECIAL",
-    "category": "Characters",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Seven"
-  },
-  {
-    "id": "spr_ironmouse",
-    "name": "Ironmouse",
-    "rarity": "MYTHIC",
-    "category": "Icons",
-    "image_url": "https://via.placeholder.com/500/E74C3C/FFFFFF?text=Ironmouse"
-  },
-  {
-    "id": "spr_pollo",
-    "name": "Pollo",
-    "rarity": "MYTHIC",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Pollo"
-  },
-  {
-    "id": "spr_llama",
-    "name": "Llama",
-    "rarity": "LEGENDARY",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Llama"
-  },
-  {
-    "id": "spr_gold_llama",
-    "name": "Gold Llama",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Llama"
-  },
-  {
-    "id": "spr_gummy_llama",
-    "name": "Gummy Llama",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Llama"
-  },
-  {
-    "id": "spr_galaxy_llama",
-    "name": "Galaxy Llama",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Llama"
-  },
-  {
-    "id": "spr_gem_llama",
-    "name": "Gem Llama",
-    "rarity": "SPECIAL",
-    "category": "Animals",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gem+Llama"
-  },
-  {
-    "id": "spr_peely",
-    "name": "Peely",
-    "rarity": "LEGENDARY",
-    "category": "Food",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Peely"
-  },
-  {
-    "id": "spr_gold_peely",
-    "name": "Gold Peely",
-    "rarity": "SPECIAL",
-    "category": "Food",
-    "image_url": "https://via.placeholder.com/500/F1C40F/FFFFFF?text=Gold+Peely"
-  },
-  {
-    "id": "spr_gummy_peely",
-    "name": "Gummy Peely",
-    "rarity": "SPECIAL",
-    "category": "Food",
-    "image_url": "https://via.placeholder.com/500/2B2D31/FFFFFF?text=Gummy+Peely"
-  },
-  {
-    "id": "spr_galaxy_peely",
-    "name": "Galaxy Peely",
-    "rarity": "SPECIAL",
-    "category": "Food",
-    "image_url": "https://via.placeholder.com/500/9B59B6/FFFFFF?text=Galaxy+Peely"
-  },
-  {
-    "id": "spr_holofoil_peely",
-    "name": "Holofoil Peely",
-    "rarity": "SPECIAL",
-    "category": "Food",
-    "image_url": "https://via.placeholder.com/500/3498DB/FFFFFF?text=Holofoil+Peely"
-  }
+  {"name": "John Wick", "rarity": "MYTHIC"},
+  {"name": "Batman", "rarity": "MYTHIC"},
+  {"name": "Cube Batman", "rarity": "SPECIAL"},
+  {"name": "Gold Batman", "rarity": "SPECIAL"},
+  {"name": "Gummy Batman", "rarity": "SPECIAL"},
+  {"name": "Galaxy Batman", "rarity": "SPECIAL"},
+  {"name": "Holofoil Batman", "rarity": "SPECIAL"},
+  {"name": "Water", "rarity": "SPECIAL"},
+  {"name": "Gold Water", "rarity": "SPECIAL"},
+  {"name": "Quack Water", "rarity": "SPECIAL"},
+  {"name": "Gummy Water", "rarity": "SPECIAL"},
+  {"name": "Galaxy Water", "rarity": "SPECIAL"},
+  {"name": "Gem Water", "rarity": "SPECIAL"},
+  {"name": "Holofoil Water", "rarity": "SPECIAL"},
+  {"name": "Earth", "rarity": "SPECIAL"},
+  {"name": "Cube Earth", "rarity": "SPECIAL"},
+  {"name": "Gold Earth", "rarity": "SPECIAL"},
+  {"name": "Quack Earth", "rarity": "SPECIAL"},
+  {"name": "Gummy Earth", "rarity": "SPECIAL"},
+  {"name": "Galaxy Earth", "rarity": "SPECIAL"},
+  {"name": "Gem Earth", "rarity": "SPECIAL"},
+  {"name": "Fire", "rarity": "RARE"},
+  {"name": "Cube Fire", "rarity": "SPECIAL"},
+  {"name": "Gold Fire", "rarity": "SPECIAL"},
+  {"name": "Quack Fire", "rarity": "SPECIAL"},
+  {"name": "Gummy Fire", "rarity": "SPECIAL"},
+  {"name": "Galaxy Fire", "rarity": "SPECIAL"},
+  {"name": "Holofoil Fire", "rarity": "SPECIAL"},
+  {"name": "Duck", "rarity": "EPIC"},
+  {"name": "Gold Duck", "rarity": "SPECIAL"},
+  {"name": "Gummy Duck", "rarity": "SPECIAL"},
+  {"name": "Galaxy Duck", "rarity": "SPECIAL"},
+  {"name": "Gem Duck", "rarity": "SPECIAL"},
+  {"name": "Ghost", "rarity": "EPIC"},
+  {"name": "Gold Ghost", "rarity": "SPECIAL"},
+  {"name": "Gummy Ghost", "rarity": "SPECIAL"},
+  {"name": "Galaxy Ghost", "rarity": "SPECIAL"},
+  {"name": "Holofoil Ghost", "rarity": "SPECIAL"},
+  {"name": "Dream", "rarity": "LEGENDARY"},
+  {"name": "Cube Dream", "rarity": "SPECIAL"},
+  {"name": "Gold Dream", "rarity": "SPECIAL"},
+  {"name": "Gummy Dream", "rarity": "SPECIAL"},
+  {"name": "Galaxy Dream", "rarity": "SPECIAL"},
+  {"name": "Demon", "rarity": "EPIC"},
+  {"name": "Punk", "rarity": "LEGENDARY"},
+  {"name": "Cube Punk", "rarity": "SPECIAL"},
+  {"name": "Gold Punk", "rarity": "SPECIAL"},
+  {"name": "Gummy Punk", "rarity": "SPECIAL"},
+  {"name": "Galaxy Punk", "rarity": "SPECIAL"},
+  {"name": "King", "rarity": "EPIC"},
+  {"name": "Gold King", "rarity": "SPECIAL"},
+  {"name": "Gummy King", "rarity": "SPECIAL"},
+  {"name": "Galaxy King", "rarity": "SPECIAL"},
+  {"name": "Holofoil King", "rarity": "SPECIAL"},
+  {"name": "Vini Jr.", "rarity": "MYTHIC"},
+  {"name": "Burnt Peanut", "rarity": "MYTHIC"},
+  {"name": "Zero Point", "rarity": "MYTHIC"},
+  {"name": "Cube Zero Point", "rarity": "SPECIAL"},
+  {"name": "Gold Zero Point", "rarity": "SPECIAL"},
+  {"name": "Quack Zero Point", "rarity": "SPECIAL"},
+  {"name": "Gummy Zero Point", "rarity": "SPECIAL"},
+  {"name": "Galaxy Zero Point", "rarity": "SPECIAL"},
+  {"name": "Gem Zero Point", "rarity": "SPECIAL"},
+  {"name": "Holofoil Zero Point", "rarity": "SPECIAL"},
+  {"name": "Fishy", "rarity": "SPECIAL"},
+  {"name": "Cube Fishy", "rarity": "SPECIAL"},
+  {"name": "Gold Fishy", "rarity": "SPECIAL"},
+  {"name": "Gummy Fishy", "rarity": "SPECIAL"},
+  {"name": "Galaxy Fishy", "rarity": "SPECIAL"},
+  {"name": "Striker", "rarity": "EPIC"},
+  {"name": "Gold Striker", "rarity": "SPECIAL"},
+  {"name": "Gummy Striker", "rarity": "SPECIAL"},
+  {"name": "Galaxy Striker", "rarity": "SPECIAL"},
+  {"name": "Holofoil Striker", "rarity": "SPECIAL"},
+  {"name": "Aura", "rarity": "EPIC"},
+  {"name": "Gold Aura", "rarity": "SPECIAL"},
+  {"name": "Gummy Aura", "rarity": "SPECIAL"},
+  {"name": "Galaxy Aura", "rarity": "SPECIAL"},
+  {"name": "Gem Aura", "rarity": "SPECIAL"},
+  {"name": "Boss", "rarity": "LEGENDARY"},
+  {"name": "Cube Boss", "rarity": "SPECIAL"},
+  {"name": "Gold Boss", "rarity": "SPECIAL"},
+  {"name": "Gummy Boss", "rarity": "SPECIAL"},
+  {"name": "Galaxy Boss", "rarity": "SPECIAL"},
+  {"name": "Grim", "rarity": "MYTHIC"},
+  {"name": "Cube Grim", "rarity": "SPECIAL"},
+  {"name": "Gold Grim", "rarity": "SPECIAL"},
+  {"name": "Gummy Grim", "rarity": "SPECIAL"},
+  {"name": "Galaxy Grim", "rarity": "SPECIAL"},
+  {"name": "Gem Grim", "rarity": "SPECIAL"},
+  {"name": "Holofoil Grim", "rarity": "SPECIAL"},
+  {"name": "Air", "rarity": "SPECIAL"},
+  {"name": "Gold Air", "rarity": "SPECIAL"},
+  {"name": "Gummy Air", "rarity": "SPECIAL"},
+  {"name": "Galaxy Air", "rarity": "SPECIAL"},
+  {"name": "Holofoil Air", "rarity": "SPECIAL"},
+  {"name": "Seven", "rarity": "LEGENDARY"},
+  {"name": "Gold Seven", "rarity": "SPECIAL"},
+  {"name": "Gummy Seven", "rarity": "SPECIAL"},
+  {"name": "Galaxy Seven", "rarity": "SPECIAL"},
+  {"name": "Holofoil Seven", "rarity": "SPECIAL"},
+  {"name": "Ironmouse", "rarity": "MYTHIC"},
+  {"name": "Pollo", "rarity": "MYTHIC"},
+  {"name": "Llama", "rarity": "LEGENDARY"},
+  {"name": "Gold Llama", "rarity": "SPECIAL"},
+  {"name": "Gummy Llama", "rarity": "SPECIAL"},
+  {"name": "Galaxy Llama", "rarity": "SPECIAL"},
+  {"name": "Gem Llama", "rarity": "SPECIAL"},
+  {"name": "Peely", "rarity": "LEGENDARY"},
+  {"name": "Gold Peely", "rarity": "SPECIAL"},
+  {"name": "Gummy Peely", "rarity": "SPECIAL"},
+  {"name": "Galaxy Peely", "rarity": "SPECIAL"},
+  {"name": "Holofoil Peely", "rarity": "SPECIAL"}
 ]
