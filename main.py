@@ -98,8 +98,7 @@ class DatabaseController:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS server_settings (
                     guild_id INTEGER PRIMARY KEY,
-                    automod_status BOOLEAN DEFAULT 0,
-                    log_channel_id INTEGER
+                    automod_status BOOLEAN DEFAULT 0
                 )
             """)
             await conn.execute("""
@@ -127,6 +126,14 @@ class DatabaseController:
                     description TEXT
                 )
             """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_inventory (
+                    user_id INTEGER,
+                    sprite_name TEXT,
+                    rarity TEXT,
+                    PRIMARY KEY (user_id, sprite_name)
+                )
+            """)
             await conn.commit()
 
     async def execute(self, query: str, params: tuple = ()):
@@ -147,18 +154,6 @@ class DatabaseController:
 
 db_controller = DatabaseController()
 
-async def dispatch_audit_log(guild: discord.Guild, embed: discord.Embed):
-    if not guild:
-        return
-    res = await db_controller.fetchone("SELECT log_channel_id FROM server_settings WHERE guild_id = ?", (guild.id,))
-    if res and res[0]:
-        target_channel = guild.get_channel(res[0])
-        if target_channel:
-            try:
-                await target_channel.send(embed=embed)
-            except Exception:
-                pass
-
 class ExtendedBotClient(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -170,7 +165,6 @@ class ExtendedBotClient(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         
         self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
-        self.server_invite_cache = {}
 
     async def set_status(self, status: str):
         channel_mapping = {
@@ -311,93 +305,89 @@ class ExtendedBotClient(commands.Bot):
             else:
                 await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        @self.tree.command(name="ban", description="Ban a member from the server.")
-        @app_commands.default_permissions(ban_members=True)
+        @self.tree.command(name="ban", description="Ban a member from the server. (Owner Only)")
         async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Permission Denied", "You cannot ban someone with an equal or higher role."), ephemeral=True)
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await member.ban(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Banned", f"Successfully banned {member.mention}.\nReason: {reason}"))
-                await dispatch_audit_log(interaction.guild, error_embed("Member Banned", f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to ban member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="unban", description="Unban a user by their user ID.")
-        @app_commands.default_permissions(ban_members=True)
+        @self.tree.command(name="unban", description="Unban a user by their user ID. (Owner Only)")
         async def unban_slash(interaction: discord.Interaction, user_id: str, reason: Optional[str] = "No reason provided"):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 user_obj = discord.Object(id=int(user_id))
                 await interaction.guild.unban(user_obj, reason=reason)
                 await interaction.response.send_message(embed=success_embed("User Unbanned", f"Successfully unbanned user ID `{user_id}`."))
-                await dispatch_audit_log(interaction.guild, success_embed("User Unbanned", f"**User ID:** `{user_id}`\n**Moderator:** {interaction.user.mention}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to unban user: {e}"), ephemeral=True)
 
-        @self.tree.command(name="tempban", description="Temporary ban a member from the server.")
-        @app_commands.default_permissions(ban_members=True)
+        @self.tree.command(name="tempban", description="Temporary ban a member from the server. (Owner Only)")
         async def tempban_slash(interaction: discord.Interaction, member: discord.Member, duration_hours: float, reason: Optional[str] = "No reason provided"):
-            if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Permission Denied", "You cannot temp-ban this user."), ephemeral=True)
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             expiry = time.time() + (duration_hours * 3600)
             try:
                 await member.ban(reason=reason)
                 await db_controller.execute("INSERT OR REPLACE INTO temporary_bans (guild_id, target_id, expiry_timestamp) VALUES (?, ?, ?)", (interaction.guild.id, member.id, expiry))
                 await interaction.response.send_message(embed=success_embed("Temporary Ban Applied", f"Successfully banned {member.mention} for {duration_hours} hours."))
-                await dispatch_audit_log(interaction.guild, warning_embed("Temporary Ban", f"**Member:** {member.mention}\n**Duration:** {duration_hours}h\n**Moderator:** {interaction.user.mention}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to temp-ban member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="kick", description="Kick a member from the server.")
-        @app_commands.default_permissions(kick_members=True)
+        @self.tree.command(name="kick", description="Kick a member from the server. (Owner Only)")
         async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if member.top_role >= interaction.user.top_role and interaction.user != interaction.guild.owner:
-                return await interaction.response.send_message(embed=error_embed("Permission Denied", "You cannot kick this user."), ephemeral=True)
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await member.kick(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Kicked", f"Successfully kicked {member.mention}."))
-                await dispatch_audit_log(interaction.guild, warning_embed("Member Kicked", f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to kick member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes.")
-        @app_commands.default_permissions(moderate_members=True)
+        @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes. (Owner Only)")
         async def timeout_slash(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: Optional[str] = "No reason provided"):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
                 await member.timeout(until, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes."))
-                await dispatch_audit_log(interaction.guild, warning_embed("Member Timed Out", f"**Member:** {member.mention}\n**Duration:** {minutes}m\n**Moderator:** {interaction.user.mention}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to timeout member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="untimeout", description="Remove timeout from a member.")
-        @app_commands.default_permissions(moderate_members=True)
+        @self.tree.command(name="untimeout", description="Remove timeout from a member. (Owner Only)")
         async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await member.timeout(None, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Successfully removed timeout for {member.mention}."))
-                await dispatch_audit_log(interaction.guild, success_embed("Timeout Removed", f"**Member:** {member.mention}\n**Moderator:** {interaction.user.mention}"))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to remove timeout: {e}"), ephemeral=True)
 
-        @self.tree.command(name="purge", description="Bulk delete messages in the channel.")
-        @app_commands.default_permissions(manage_messages=True)
+        @self.tree.command(name="purge", description="Bulk delete messages in the channel. (Owner Only)")
         async def purge_slash(interaction: discord.Interaction, amount: int):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             await interaction.response.defer(ephemeral=True)
             deleted = await interaction.channel.purge(limit=amount)
             await interaction.followup.send(embed=success_embed("Purge Complete", f"Successfully deleted {len(deleted)} messages."), ephemeral=True)
 
-        @self.tree.command(name="warn", description="Issue an official warning to a member.")
-        @app_commands.default_permissions(moderate_members=True)
+        @self.tree.command(name="warn", description="Issue an official warning to a member. (Owner Only)")
         async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             await db_controller.execute("INSERT INTO warning_records (guild_id, target_id, moderator_id, reason) VALUES (?, ?, ?, ?)", (interaction.guild.id, member.id, interaction.user.id, reason))
             await interaction.response.send_message(embed=success_embed("Warning Issued", f"Warned {member.mention} for: {reason}"))
-            await dispatch_audit_log(interaction.guild, warning_embed("Warning Logged", f"**User:** {member.mention}\n**Moderator:** {interaction.user.mention}\n**Reason:** {reason}"))
 
-        @self.tree.command(name="warnings", description="View all warnings for a specific member.")
-        @app_commands.default_permissions(moderate_members=True)
+        @self.tree.command(name="warnings", description="View all warnings for a specific member. (Owner Only)")
         async def warnings_slash(interaction: discord.Interaction, member: discord.Member):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             rows = await db_controller.fetchall("SELECT id, moderator_id, reason, timestamp FROM warning_records WHERE guild_id = ? AND target_id = ?", (interaction.guild.id, member.id))
             if not rows:
                 return await interaction.response.send_message(embed=info_embed("No Warnings", f"{member.mention} has no active warnings recorded."), ephemeral=True)
@@ -409,60 +399,55 @@ class ExtendedBotClient(commands.Bot):
             
             await interaction.response.send_message(embed=make_embed(f"Warnings for {member.name}", desc, COLOR_WARNING), ephemeral=True)
 
-        @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds.")
-        @app_commands.default_permissions(manage_channels=True)
+        @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds. (Owner Only)")
         async def slowmode_slash(interaction: discord.Interaction, seconds: int):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await interaction.channel.edit(slowmode_delay=seconds)
                 await interaction.response.send_message(embed=success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds."))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to update slowmode: {e}"), ephemeral=True)
 
-        @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages.")
-        @app_commands.default_permissions(manage_channels=True)
+        @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages. (Owner Only)")
         async def lock_slash(interaction: discord.Interaction):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
                 await interaction.response.send_message(embed=success_embed("Channel Locked", "This channel has been locked."))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to lock channel: {e}"), ephemeral=True)
 
-        @self.tree.command(name="unlock", description="Unlock the current channel.")
-        @app_commands.default_permissions(manage_channels=True)
+        @self.tree.command(name="unlock", description="Unlock the current channel. (Owner Only)")
         async def unlock_slash(interaction: discord.Interaction):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
                 await interaction.response.send_message(embed=success_embed("Channel Unlocked", "This channel has been unlocked."))
             except Exception as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to unlock channel: {e}"), ephemeral=True)
 
-        @self.tree.command(name="say", description="Make the bot say something in the channel.")
-        @app_commands.default_permissions(manage_messages=True)
+        @self.tree.command(name="say", description="Make the bot say something in the channel. (Owner Only)")
         async def say_slash(interaction: discord.Interaction, message: str):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             await interaction.response.send_message(embed=success_embed("Message Sent", "Done!"), ephemeral=True)
             await interaction.channel.send(message)
 
-        @self.tree.command(name="embed", description="Send a custom text inside an embed.")
-        @app_commands.default_permissions(manage_messages=True)
+        @self.tree.command(name="embed", description="Send a custom text inside an embed. (Owner Only)")
         async def embed_slash(interaction: discord.Interaction, title: str, description: str):
+            if interaction.user != interaction.guild.owner:
+                return await interaction.response.send_message(embed=error_embed("Owner Only", "This command can only be used by the server owner."), ephemeral=True)
             await interaction.response.send_message(embed=success_embed("Embed Sent", "Done!"), ephemeral=True)
             await interaction.channel.send(embed=make_embed(title, description, COLOR_INFO))
 
         @self.tree.command(name="automod", description="Toggle or configure the AutoMod filter status.")
         @app_commands.default_permissions(administrator=True)
         async def automod_slash(interaction: discord.Interaction, status: bool):
-            res = await db_controller.fetchone("SELECT log_channel_id FROM server_settings WHERE guild_id = ?", (interaction.guild.id,))
-            old_log = res[0] if res else None
-            await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status, log_channel_id) VALUES (?, ?, ?)", (interaction.guild.id, status, old_log))
+            await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status) VALUES (?, ?)", (interaction.guild.id, status))
             await interaction.response.send_message(embed=success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`"))
-
-        @self.tree.command(name="setlogchannel", description="Set the log channel for server events.")
-        @app_commands.default_permissions(administrator=True)
-        async def setlogchannel_slash(interaction: discord.Interaction, channel: discord.TextChannel):
-            res = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (interaction.guild.id,))
-            old_automod = res[0] if res else 0
-            await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status, log_channel_id) VALUES (?, ?, ?)", (interaction.guild.id, old_automod, channel.id))
-            await interaction.response.send_message(embed=success_embed("Log Channel Configured", f"Audit logs will now be sent to {channel.mention}."))
 
         @self.tree.command(name="giveaway", description="Start a new server giveaway.")
         @app_commands.default_permissions(manage_guild=True)
@@ -505,11 +490,6 @@ class ExtendedBotClient(commands.Bot):
         print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
         await self.set_status('online')
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
-        for guild in self.guilds:
-            try:
-                self.server_invite_cache[guild.id] = await guild.invites()
-            except Exception:
-                pass
 
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -559,12 +539,10 @@ class ExtendedBotClient(commands.Bot):
         if settings and settings[0] and not message.author.guild_permissions.manage_messages:
             if self.invite_link_regex.search(message.content):
                 await message.delete()
-                await dispatch_audit_log(message.guild, warning_embed("Automod Action Triggered", f"Blocked unauthorized invite link sent by {message.author.mention} in {message.channel.mention}."))
                 return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, server invite links are strictly prohibited."), delete_after=5)
 
             if len(message.content) > 10 and sum(1 for c in message.content if c.isupper()) / len(message.content) > 0.8:
                 await message.delete()
-                await dispatch_audit_log(message.guild, warning_embed("Automod Action Triggered", f"Removed uppercase text spam sent by {message.author.mention} in {message.channel.mention}."))
                 return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, please avoid excessive capitalization."), delete_after=5)
 
         if message.channel.id in sticky_messages:
@@ -579,82 +557,6 @@ class ExtendedBotClient(commands.Bot):
             sticky_messages[message.channel.id]["message_id"] = new_sticky.id
 
         await self.process_commands(message)
-
-    async def on_member_join(self, member: discord.Member):
-        guild = member.guild
-        used_invite = None
-        try:
-            old_invites = self.server_invite_cache.get(guild.id, [])
-            new_invites = await guild.invites()
-            self.server_invite_cache[guild.id] = new_invites
-            for new_inv in new_invites:
-                for old_inv in old_invites:
-                    if new_inv.code == old_inv.code and new_inv.uses > old_inv.uses:
-                        used_invite = new_inv
-                        break
-        except Exception:
-            pass
-
-        invite_details = f"Invite: `{used_invite.code}` (Inviter: {used_invite.inviter}, Total Uses: {used_invite.uses})" if used_invite else "Invite tracking data unavailable"
-        await dispatch_audit_log(guild, success_embed("Member Joined", f"**Member:** {member.mention} (`{member.id}`)\n{invite_details}"))
-
-    async def on_member_remove(self, member: discord.Member):
-        await dispatch_audit_log(member.guild, error_embed("Member Left", f"**Member:** {member.mention} (`{member.id}`)"))
-
-    async def on_member_update(self, before: discord.Member, after: discord.Member):
-        guild = after.guild
-        old_roles = set(before.roles)
-        new_roles = set(after.roles)
-
-        for role in new_roles - old_roles:
-            await dispatch_audit_log(guild, success_embed("Role Assigned", f"**Member:** {after.mention}\n**Role:** {role.mention}"))
-        for role in old_roles - new_roles:
-            await dispatch_audit_log(guild, warning_embed("Role Removed", f"**Member:** {after.mention}\n**Role:** {role.mention}"))
-
-        if before.timed_out_until != after.timed_out_until and after.is_timed_out():
-            await dispatch_audit_log(guild, warning_embed("Timeout Applied", f"**Member:** {after.mention}\n**Until:** <t:{int(after.timed_out_until.timestamp())}:F>"))
-
-        if before.nick != after.nick:
-            await dispatch_audit_log(guild, make_embed("Nickname Modified", f"**Member:** {after.mention}\nBefore: `{before.nick or before.name}`\nAfter: `{after.nick or after.name}`", COLOR_WARNING))
-
-    async def on_member_ban(self, guild: discord.Guild, user: discord.abc.User):
-        await dispatch_audit_log(guild, error_embed("User Banned", f"**User:** {user.mention} (`{user.id}`)"))
-
-    async def on_member_unban(self, guild: discord.Guild, user: discord.abc.User):
-        await dispatch_audit_log(guild, success_embed("User Unbanned", f"**User:** {user.mention} (`{user.id}`)"))
-
-    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-        guild = member.guild
-        if not before.channel and after.channel:
-            await dispatch_audit_log(guild, success_embed("Voice Channel Joined", f"**Member:** {member.mention} joined {after.channel.mention}"))
-        elif before.channel and not after.channel:
-            await dispatch_audit_log(guild, error_embed("Voice Channel Left", f"**Member:** {member.mention} left {before.channel.mention}"))
-        elif before.channel and after.channel and before.channel.id != after.channel.id:
-            await dispatch_audit_log(guild, make_embed("Voice Channel Switched", f"**Member:** {member.mention} moved from {before.channel.mention} to {after.channel.mention}", COLOR_WARNING))
-
-    async def on_guild_role_create(self, role: discord.Role):
-        await dispatch_audit_log(role.guild, success_embed("Role Created", f"**Role:** {role.mention}"))
-
-    async def on_guild_role_delete(self, role: discord.Role):
-        await dispatch_audit_log(role.guild, error_embed("Role Deleted", f"**Role Name:** `{role.name}`"))
-
-    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
-        await dispatch_audit_log(channel.guild, success_embed("Channel Created", f"**Channel:** {channel.mention}"))
-
-    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
-        await dispatch_audit_log(channel.guild, error_embed("Channel Deleted", f"**Channel Name:** `{channel.name}`"))
-
-    async def on_message_delete(self, message: discord.Message):
-        if not message.guild or message.author.bot:
-            return
-        content_txt = message.content or "[No text data available]"
-        await dispatch_audit_log(
-            message.guild, 
-            warning_embed(
-                "Message Deleted", 
-                f"**Author:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n```{content_txt[:900]}```"
-            )
-        )
 
 async def handle_ping(request):
     return web.Response(text="Bot is running and healthy!")
