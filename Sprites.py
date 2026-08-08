@@ -12,7 +12,7 @@ class Sprites(commands.Cog):
     async def seed_sprites(self):
         await self.bot.wait_until_ready()
         try:
-            from Main import db_controller
+            from main import db_controller
             
             if os.path.exists("sprites.json"):
                 with open("sprites.json", "r", encoding="utf-8") as f:
@@ -32,7 +32,7 @@ class Sprites(commands.Cog):
 
     async def sprite_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         try:
-            from Main import db_controller
+            from main import db_controller
             rows = await db_controller.fetchall("SELECT name FROM sprites_data")
             sprite_names = [row[0] for row in rows]
             
@@ -49,7 +49,7 @@ class Sprites(commands.Cog):
     @app_commands.autocomplete(sprite_name=sprite_autocomplete)
     async def addsprite(self, interaction: discord.Interaction, sprite_name: str):
         try:
-            from Main import db_controller
+            from main import db_controller
             
             catalog_item = await db_controller.fetchone(
                 "SELECT description FROM sprites_data WHERE name = ?", (sprite_name,)
@@ -101,7 +101,7 @@ class Sprites(commands.Cog):
     @app_commands.command(name="listsprites", description="View all available sprites in the game catalog.")
     async def listsprites(self, interaction: discord.Interaction):
         try:
-            from Main import db_controller
+            from main import db_controller
             rows = await db_controller.fetchall("SELECT name, description FROM sprites_data")
             
             if not rows:
@@ -134,7 +134,7 @@ class Sprites(commands.Cog):
     async def inventory(self, interaction: discord.Interaction, user: discord.Member = None):
         target = user or interaction.user
         try:
-            from Main import db_controller
+            from main import db_controller
             rows = await db_controller.fetchall("SELECT sprite_name, rarity FROM user_inventory WHERE user_id = ?", (target.id,))
             
             if not rows:
