@@ -607,3 +607,265 @@ if __name__ == "__main__":
         print("Error: DISCORD_TOKEN is missing in the environment variables.")
     else:
         asyncio.run(main())
+import os
+import re
+import json
+import time
+import random
+import asyncio
+import datetime
+import traceback
+from typing import Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+import aiosqlite
+from aiohttp import web
+from dotenv import load_dotenv
+from groq import Groq
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+DATABASE_NAME = os.getenv("DATABASE_PATH", "bot.db")
+WEB_PORT = int(os.getenv("PORT", 10000))
+GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
+
+CHANNEL_ONLINE_ID = 1533920905258995905
+CHANNEL_UPDATING_ID = 1533921928224702685
+CHANNEL_OFFLINE_ID = 1533922000005894224
+
+COLOR_NEUTRAL = 0x2B2D31
+COLOR_SUCCESS = 0x2ECC71
+COLOR_WARNING = 0xF1C40F
+COLOR_DANGER = 0xE74C3C
+COLOR_INFO = 0x3498DB
+COLOR_PURPLE = 0x9B59B6
+
+SPECIAL_USER_ID = 1242143149917212767
+
+groq_api_client = None
+if GROQ_API_SECRET:
+    try:
+        groq_api_client = Groq(api_key=GROQ_API_SECRET)
+    except Exception as initialization_exception:
+        print(f"Failed to initialize Groq client: {initialization_exception}")
+
+sticky_messages = {}
+user_cooldowns = {}
+
+def is_authorized(interaction: discord.Interaction) -> bool:
+    return interaction.user == interaction.guild.owner or interaction.user.id == SPECIAL_USER_ID
+
+def make_embed(title: str, description: str, color: int = COLOR_NEUTRAL) -> discord.Embed:
+    embed_instance = discord.Embed(title=title, description=description, color=color)
+    embed_instance.timestamp = datetime.datetime.now(datetime.timezone.utc)
+    return embed_instance
+
+def success_embed(title: str, description: str) -> discord.Embed:
+    return make_embed(f"✔ {title}", description, COLOR_SUCCESS)
+
+def error_embed(title: str, description: str) -> discord.Embed:
+    return make_embed(f"✖ {title}", description, COLOR_DANGER)
+
+def warning_embed(title: str, description: str) -> discord.Embed:
+    return make_embed(f"⚠ {title}", description, COLOR_WARNING)
+
+def info_embed(title: str, description: str) -> discord.Embed:
+    return make_embed(f"ℹ {title}", description, COLOR_INFO)
+
+class DatabaseController:
+    def __init__(self, db_path: str = DATABASE_NAME):
+        self.db_path = db_path
+
+    async def initialize_database(self):
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS warning_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER,
+                    target_id INTEGER,
+                    moderator_id INTEGER,
+                    reason TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS temporary_bans (
+                    guild_id INTEGER,
+                    target_id INTEGER,
+                    expiry_timestamp REAL,
+                    PRIMARY KEY (guild_id, target_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS giveaway_system (
+                    message_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER,
+                    guild_id INTEGER,
+                    prize_name TEXT,
+                    ends_at REAL,
+                    is_ended BOOLEAN DEFAULT 0
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS server_settings (
+                    guild_id INTEGER PRIMARY KEY,
+                    automod_status BOOLEAN DEFAULT 0
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS reaction_role_bindings (
+                    message_id INTEGER,
+                    emoji_icon TEXT,
+                    role_id INTEGER,
+                    PRIMARY KEY (message_id, emoji_icon)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_vouches (
+                    guild_id INTEGER,
+                    target_id INTEGER,
+                    giver_id INTEGER,
+                    reason TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (guild_id, target_id, giver_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS sprites_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE,
+                    description TEXT
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_inventory (
+                    user_id INTEGER,
+                    sprite_name TEXT,
+                    rarity TEXT,
+                    PRIMARY KEY (user_id, sprite_name)
+                )
+            """)
+            await conn.commit()
+
+        default_sprites = [
+            {"name": "John Wick", "rarity": "MYTHIC"}, {"name": "Batman", "rarity": "MYTHIC"},
+            {"name": "Cube Batman", "rarity": "SPECIAL"}, {"name": "Gold Batman", "rarity": "SPECIAL"},
+            {"name": "Gummy Batman", "rarity": "SPECIAL"}, {"name": "Galaxy Batman", "rarity": "SPECIAL"},
+            {"name": "Holofoil Batman", "rarity": "SPECIAL"}, {"name": "Water", "rarity": "SPECIAL"},
+            {"name": "Gold Water", "rarity": "SPECIAL"}, {"name": "Quack Water", "rarity": "SPECIAL"},
+            {"name": "Gummy Water", "rarity": "SPECIAL"}, {"name": "Galaxy Water", "rarity": "SPECIAL"},
+            {"name": "Gem Water", "rarity": "SPECIAL"}, {"name": "Holofoil Water", "rarity": "SPECIAL"},
+            {"name": "Earth", "rarity": "SPECIAL"}, {"name": "Cube Earth", "rarity": "SPECIAL"},
+            {"name": "Gold Earth", "rarity": "SPECIAL"}, {"name": "Quack Earth", "rarity": "SPECIAL"},
+            {"name": "Gummy Earth", "rarity": "SPECIAL"}, {"name": "Galaxy Earth", "rarity": "SPECIAL"},
+            {"name": "Gem Earth", "rarity": "SPECIAL"}, {"name": "Fire", "rarity": "RARE"},
+            {"name": "Cube Fire", "rarity": "SPECIAL"}, {"name": "Gold Fire", "rarity": "SPECIAL"},
+            {"name": "Quack Fire", "rarity": "SPECIAL"}, {"name": "Gummy Fire", "rarity": "SPECIAL"},
+            {"name": "Galaxy Fire", "rarity": "SPECIAL"}, {"name": "Holofoil Fire", "rarity": "SPECIAL"},
+            {"name": "Duck", "rarity": "EPIC"}, {"name": "Gold Duck", "rarity": "SPECIAL"},
+            {"name": "Gummy Duck", "rarity": "SPECIAL"}, {"name": "Galaxy Duck", "rarity": "SPECIAL"},
+            {"name": "Gem Duck", "rarity": "SPECIAL"}, {"name": "Ghost", "rarity": "EPIC"},
+            {"name": "Gold Ghost", "rarity": "SPECIAL"}, {"name": "Gummy Ghost", "rarity": "SPECIAL"},
+            {"name": "Galaxy Ghost", "rarity": "SPECIAL"}, {"name": "Holofoil Ghost", "rarity": "SPECIAL"},
+            {"name": "Dream", "rarity": "LEGENDARY"}, {"name": "Cube Dream", "rarity": "SPECIAL"},
+            {"name": "Gold Dream", "rarity": "SPECIAL"}, {"name": "Gummy Dream", "rarity": "SPECIAL"},
+            {"name": "Galaxy Dream", "rarity": "SPECIAL"}, {"name": "Demon", "rarity": "EPIC"},
+            {"name": "Punk", "rarity": "LEGENDARY"}, {"name": "Cube Punk", "rarity": "SPECIAL"},
+            {"name": "Gold Punk", "rarity": "SPECIAL"}, {"name": "Gummy Punk", "rarity": "SPECIAL"},
+            {"name": "Galaxy Punk", "rarity": "SPECIAL"}, {"name": "King", "rarity": "EPIC"},
+            {"name": "Gold King", "rarity": "SPECIAL"}, {"name": "Gummy King", "rarity": "SPECIAL"},
+            {"name": "Galaxy King", "rarity": "SPECIAL"}, {"name": "Holofoil King", "rarity": "SPECIAL"},
+            {"name": "Vini Jr.", "rarity": "MYTHIC"}, {"name": "Burnt Peanut", "rarity": "MYTHIC"},
+            {"name": "Zero Point", "rarity": "MYTHIC"}, {"name": "Cube Zero Point", "rarity": "SPECIAL"},
+            {"name": "Gold Zero Point", "rarity": "SPECIAL"}, {"name": "Quack Zero Point", "rarity": "SPECIAL"},
+            {"name": "Gummy Zero Point", "rarity": "SPECIAL"}, {"name": "Galaxy Zero Point", "rarity": "SPECIAL"},
+            {"name": "Gem Zero Point", "rarity": "SPECIAL"}, {"name": "Holofoil Zero Point", "rarity": "SPECIAL"},
+            {"name": "Fishy", "rarity": "SPECIAL"}, {"name": "Cube Fishy", "rarity": "SPECIAL"},
+            {"name": "Gold Fishy", "rarity": "SPECIAL"}, {"name": "Gummy Fishy", "rarity": "SPECIAL"},
+            {"name": "Galaxy Fishy", "rarity": "SPECIAL"}, {"name": "Striker", "rarity": "EPIC"},
+            {"name": "Gold Striker", "rarity": "SPECIAL"}, {"name": "Gummy Striker", "rarity": "SPECIAL"},
+            {"name": "Galaxy Striker", "rarity": "SPECIAL"}, {"name": "Holofoil Striker", "rarity": "SPECIAL"},
+            {"name": "Aura", "rarity": "EPIC"}, {"name": "Gold Aura", "rarity": "SPECIAL"},
+            {"name": "Gummy Aura", "rarity": "SPECIAL"}, {"name": "Galaxy Aura", "rarity": "SPECIAL"},
+            {"name": "Gem Aura", "rarity": "SPECIAL"}, {"name": "Boss", "rarity": "LEGENDARY"},
+            {"name": "Cube Boss", "rarity": "SPECIAL"}, {"name": "Gold Boss", "rarity": "SPECIAL"},
+            {"name": "Gummy Boss", "rarity": "SPECIAL"}, {"name": "Galaxy Boss", "rarity": "SPECIAL"},
+            {"name": "Grim", "rarity": "MYTHIC"}, {"name": "Cube Grim", "rarity": "SPECIAL"},
+            {"name": "Gold Grim", "rarity": "SPECIAL"}, {"name": "Gummy Grim", "rarity": "SPECIAL"},
+            {"name": "Galaxy Grim", "rarity": "SPECIAL"}, {"name": "Gem Grim", "rarity": "SPECIAL"},
+            {"name": "Holofoil Grim", "rarity": "SPECIAL"}, {"name": "Air", "rarity": "SPECIAL"},
+            {"name": "Gold Air", "rarity": "SPECIAL"}, {"name": "Gummy Air", "rarity": "SPECIAL"},
+            {"name": "Galaxy Air", "rarity": "SPECIAL"}, {"name": "Holofoil Air", "rarity": "SPECIAL"},
+            {"name": "Seven", "rarity": "LEGENDARY"}, {"name": "Gold Seven", "rarity": "SPECIAL"},
+            {"name": "Gummy Seven", "rarity": "SPECIAL"}, {"name": "Galaxy Seven", "rarity": "SPECIAL"},
+            {"name": "Holofoil Seven", "rarity": "SPECIAL"}, {"name": "Ironmouse", "rarity": "MYTHIC"},
+            {"name": "Pollo", "rarity": "MYTHIC"}, {"name": "Llama", "rarity": "LEGENDARY"},
+            {"name": "Gold Llama", "rarity": "SPECIAL"}, {"name": "Gummy Llama", "rarity": "SPECIAL"},
+            {"name": "Galaxy Llama", "rarity": "SPECIAL"}, {"name": "Gem Llama", "rarity": "SPECIAL"},
+            {"name": "Peely", "rarity": "LEGENDARY"}, {"name": "Gold Peely", "rarity": "SPECIAL"},
+            {"name": "Gummy Peely", "rarity": "SPECIAL"}, {"name": "Galaxy Peely", "rarity": "SPECIAL"},
+            {"name": "Holofoil Peely", "rarity": "SPECIAL"}
+        ]
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            for sprite in default_sprites:
+                name = sprite.get("name")
+                rarity = sprite.get("rarity", "SPECIAL")
+                description = f"Rarity: {rarity}"
+                await conn.execute(
+                    "INSERT OR REPLACE INTO sprites_data (name, description) VALUES (?, ?)",
+                    (name, description)
+                )
+            await conn.commit()
+        print("Sprites successfully loaded into the database!")
+
+    async def execute(self, query: str, params: tuple = ()):
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.execute(query, params)
+            await conn.commit()
+            return cursor
+
+    async def fetchone(self, query: str, params: tuple = ()):
+        async with aiosqlite.connect(self.db_path) as conn:
+            async with conn.execute(query, params) as cursor:
+                return await cursor.fetchone()
+
+    async def fetchall(self, query: str, params: tuple = ()):
+        async with aiosqlite.connect(self.db_path) as conn:
+            async with conn.execute(query, params) as cursor:
+                return await cursor.fetchall()
+
+db_controller = DatabaseController()
+
+class ExtendedBotClient(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.guilds = True
+        intents.members = True
+        intents.message_content = True
+        intents.guild_messages = True
+        intents.voice_states = True
+        super().__init__(command_prefix="!", intents=intents)
+
+    async def setup_hook(self):
+        await db_controller.initialize_database()
+        await self.load_extension("Sprites")
+        print("Sprites cog successfully loaded.")
+        await self.tree.sync()
+        print("Slash commands synced.")
+
+    async def on_ready(self):
+        print(f"Successfully logged in as {self.user} (ID: {self.user.id})")
+
+async def main():
+    client = ExtendedBotClient()
+    await client.start(BOT_TOKEN)
+
+if __name__ == "__main__":
+    if not BOT_TOKEN:
+        print("Error: DISCORD_TOKEN is missing in the environment variables.")
+    else:
+        asyncio.run(main())
