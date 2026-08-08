@@ -239,16 +239,32 @@ class Sprites(commands.Cog):
                 )
                 return await interaction.response.send_message(embed=embed)
             
-            desc = ""
+            # Split items into chunks to stay safely under Discord's 4096 character limit
+            embeds = []
+            current_desc = ""
+            
             for name, rarity in rows:
-                desc += f"🌟 **{name}** `[{rarity}]`\n"
-                
-            embed = discord.Embed(
-                title=f"🎒 Game Inventory — {target.name}",
-                description=desc,
-                color=0xF1C40F
-            )
-            await interaction.response.send_message(embed=embed)
+                line = f"🌟 **{name}** `[{rarity}]`\n"
+                if len(current_desc) + len(line) > 4000:
+                    embeds.append(discord.Embed(
+                        title=f"🎒 Game Inventory — {target.name}",
+                        description=current_desc,
+                        color=0xF1C40F
+                    ))
+                    current_desc = line
+                else:
+                    current_desc += line
+                    
+            if current_desc:
+                embeds.append(discord.Embed(
+                    title=f"🎒 Game Inventory — {target.name}",
+                    description=current_desc,
+                    color=0xF1C40F
+                ))
+            
+            # Send the first page safely to prevent character length errors
+            await interaction.response.send_message(embed=embeds[0])
+            
         except Exception as e:
             embed = discord.Embed(
                 title="✖ Error",
