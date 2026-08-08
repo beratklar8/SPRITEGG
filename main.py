@@ -142,7 +142,7 @@ class DatabaseController:
             """)
             await conn.commit()
 
-        # Automatically load sprites from sprites.json into the database if present
+        # Automatically load sprites from sprites.json into the database
         if os.path.exists("sprites.json"):
             try:
                 with open("sprites.json", "r", encoding="utf-8") as f:
@@ -153,7 +153,7 @@ class DatabaseController:
                             rarity = sprite.get("rarity", "SPECIAL")
                             description = f"Rarity: {rarity}"
                             await conn.execute(
-                                "INSERT OR IGNORE INTO sprites_data (name, description) VALUES (?, ?)",
+                                "INSERT OR REPLACE INTO sprites_data (name, description) VALUES (?, ?)",
                                 (name, description)
                             )
                         await conn.commit()
