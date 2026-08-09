@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 import aiosqlite
 from aiohttp import web
 from dotenv import load_dotenv
-from groq import Groq
+from groq import AsyncGroq
 
 load_dotenv()
 
@@ -40,15 +40,36 @@ SPECIAL_USER_ID = 1242143149917212767
 groq_api_client = None
 if GROQ_API_SECRET:
     try:
-        groq_api_client = Groq(api_key=GROQ_API_SECRET)
+        groq_api_client = AsyncGroq(api_key=GROQ_API_SECRET)
     except Exception as initialization_exception:
         print(f"Failed to initialize Groq client: {initialization_exception}")
 
-sticky_messages = {}
 user_cooldowns = {}
 
-def is_authorized(interaction: discord.Interaction) -> bool:
-    return interaction.user == interaction.guild.owner or interaction.user.id == SPECIAL_USER_ID
+def is_owner_or_special(interaction: discord.Interaction) -> bool:
+    if not interaction.guild:
+        return False
+    return interaction.user.id == SPECIAL_USER_ID or interaction.user == interaction.guild.owner
+
+def has_permission(interaction: discord.Interaction, permission_name: str) -> bool:
+    if is_owner_or_special(interaction):
+        return True
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
+        return False
+    permissions = interaction.user.guild_permissions
+    if getattr(permissions, "administrator", False):
+        return True
+    return getattr(permissions, permission_name, False)
+
+async def check_permission_and_respond(interaction: discord.Interaction, permission_name: str) -> bool:
+    if not has_permission(interaction, permission_name):
+        embed = error_embed("Access Denied", "Je hebt geen toestemming om dit command te gebruiken.")
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        return False
+    return True
 
 def make_embed(title: str, description: str, color: int = COLOR_NEUTRAL) -> discord.Embed:
     embed_instance = discord.Embed(title=title, description=description, color=color)
@@ -73,6 +94,7 @@ class DatabaseController:
 
     async def initialize_database(self):
         async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("PRAGMA journal_mode=WAL;")
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS warning_records (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,6 +145,14 @@ class DatabaseController:
                     reason TEXT,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (guild_id, target_id, giver_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS sticky_messages (
+                    channel_id INTEGER PRIMARY KEY,
+                    guild_id INTEGER,
+                    text TEXT,
+                    message_id INTEGER
                 )
             """)
             await conn.execute("""
@@ -251,6 +281,7 @@ class ExtendedBotClient(commands.Bot):
         intents.message_content = True
         intents.guild_messages = True
         intents.voice_states = True
+        intents.reactions = True
         super().__init__(command_prefix="!", intents=intents)
         
         self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
@@ -278,7 +309,7 @@ class ExtendedBotClient(commands.Bot):
                     if current_overwrite.view_channel != should_be_visible:
                         current_overwrite.view_channel = should_be_visible
                         await channel.set_permissions(channel.guild.default_role, overwrite=current_overwrite)
-                except Exception as e:
+                except discord.HTTPException as e:
                     print(f"Failed to change visibility of channel {chan_id}: {e}")
 
     @tasks.loop(minutes=1)
@@ -308,7 +339,7 @@ class ExtendedBotClient(commands.Bot):
                     await channel.send(embed=success_embed("Giveaway Ended!", f"Congratulations {winner.mention}! You won the **{prize}**!"))
                 else:
                     await channel.send(embed=info_embed("Giveaway Ended", f"Giveaway for **{prize}** ended, but no valid entries were found."))
-            except Exception:
+            except (discord.NotFound, discord.HTTPException):
                 pass
 
     @tasks.loop(minutes=1)
@@ -321,7 +352,7 @@ class ExtendedBotClient(commands.Bot):
             if guild:
                 try:
                     await guild.unban(discord.Object(id=target_id), reason="Temporary ban expired.")
-                except Exception:
+                except (discord.NotFound, discord.HTTPException):
                     pass
             await db_controller.execute("DELETE FROM temporary_bans WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
 
@@ -394,89 +425,106 @@ class ExtendedBotClient(commands.Bot):
             else:
                 await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        @self.tree.command(name="ban", description="Ban a member from the server. (Owner Only)")
+        @self.tree.command(name="ban", description="Ban a member from the server.")
+        @app_commands.default_permissions(ban_members=True)
         async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "ban_members"):
+                return
             try:
                 await member.ban(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Banned", f"Successfully banned {member.mention}.\nReason: {reason}"))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to ban member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="unban", description="Unban a user by their user ID. (Owner Only)")
+        @self.tree.command(name="unban", description="Unban a user by their user ID.")
+        @app_commands.default_permissions(ban_members=True)
         async def unban_slash(interaction: discord.Interaction, user_id: str, reason: Optional[str] = "No reason provided"):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "ban_members"):
+                return
             try:
                 user_obj = discord.Object(id=int(user_id))
                 await interaction.guild.unban(user_obj, reason=reason)
                 await interaction.response.send_message(embed=success_embed("User Unbanned", f"Successfully unbanned user ID `{user_id}`."))
-            except Exception as e:
+            except ValueError:
+                await interaction.response.send_message(embed=error_embed("Error", "Ongeldige user ID opgegeven."), ephemeral=True)
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to unban user: {e}"), ephemeral=True)
 
-        @self.tree.command(name="tempban", description="Temporary ban a member from the server. (Owner Only)")
+        @self.tree.command(name="tempban", description="Temporary ban a member from the server.")
+        @app_commands.default_permissions(ban_members=True)
         async def tempban_slash(interaction: discord.Interaction, member: discord.Member, duration_hours: float, reason: Optional[str] = "No reason provided"):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "ban_members"):
+                return
+            if duration_hours <= 0:
+                return await interaction.response.send_message(embed=error_embed("Error", "Duur moet groter zijn dan 0 uur."), ephemeral=True)
             expiry = time.time() + (duration_hours * 3600)
             try:
                 await member.ban(reason=reason)
                 await db_controller.execute("INSERT OR REPLACE INTO temporary_bans (guild_id, target_id, expiry_timestamp) VALUES (?, ?, ?)", (interaction.guild.id, member.id, expiry))
                 await interaction.response.send_message(embed=success_embed("Temporary Ban Applied", f"Successfully banned {member.mention} for {duration_hours} hours."))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to temp-ban member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="kick", description="Kick a member from the server. (Owner Only)")
+        @self.tree.command(name="kick", description="Kick a member from the server.")
+        @app_commands.default_permissions(kick_members=True)
         async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "kick_members"):
+                return
             try:
                 await member.kick(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Kicked", f"Successfully kicked {member.mention}."))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to kick member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes. (Owner Only)")
+        @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes.")
+        @app_commands.default_permissions(moderate_members=True)
         async def timeout_slash(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: Optional[str] = "No reason provided"):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "moderate_members"):
+                return
+            if minutes <= 0:
+                return await interaction.response.send_message(embed=error_embed("Error", "Aantal minuten moet groter zijn dan 0."), ephemeral=True)
             try:
                 until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
                 await member.timeout(until, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes."))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to timeout member: {e}"), ephemeral=True)
 
-        @self.tree.command(name="untimeout", description="Remove timeout from a member. (Owner Only)")
+        @self.tree.command(name="untimeout", description="Remove timeout from a member.")
+        @app_commands.default_permissions(moderate_members=True)
         async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "moderate_members"):
+                return
             try:
                 await member.timeout(None, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Successfully removed timeout for {member.mention}."))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to remove timeout: {e}"), ephemeral=True)
 
-        @self.tree.command(name="purge", description="Bulk delete messages in the channel. (Owner Only)")
+        @self.tree.command(name="purge", description="Bulk delete messages in the channel.")
+        @app_commands.default_permissions(manage_messages=True)
         async def purge_slash(interaction: discord.Interaction, amount: int):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "manage_messages"):
+                return
+            if amount <= 0:
+                return await interaction.response.send_message(embed=error_embed("Error", "Aantal moet groter zijn dan 0."), ephemeral=True)
             await interaction.response.defer(ephemeral=True)
             deleted = await interaction.channel.purge(limit=amount)
             await interaction.followup.send(embed=success_embed("Purge Complete", f"Successfully deleted {len(deleted)} messages."), ephemeral=True)
 
-        @self.tree.command(name="warn", description="Issue an official warning to a member. (Owner Only)")
+        @self.tree.command(name="warn", description="Issue an official warning to a member.")
+        @app_commands.default_permissions(moderate_members=True)
         async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "moderate_members"):
+                return
             await db_controller.execute("INSERT INTO warning_records (guild_id, target_id, moderator_id, reason) VALUES (?, ?, ?, ?)", (interaction.guild.id, member.id, interaction.user.id, reason))
             await interaction.response.send_message(embed=success_embed("Warning Issued", f"Warned {member.mention} for: {reason}"))
 
-        @self.tree.command(name="warnings", description="View all warnings for a specific member. (Owner Only)")
+        @self.tree.command(name="warnings", description="View all warnings for a specific member.")
+        @app_commands.default_permissions(moderate_members=True)
         async def warnings_slash(interaction: discord.Interaction, member: discord.Member):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "moderate_members"):
+                return
             rows = await db_controller.fetchall("SELECT id, moderator_id, reason, timestamp FROM warning_records WHERE guild_id = ? AND target_id = ?", (interaction.guild.id, member.id))
             if not rows:
                 return await interaction.response.send_message(embed=info_embed("No Warnings", f"{member.mention} has no active warnings recorded."), ephemeral=True)
@@ -488,59 +536,72 @@ class ExtendedBotClient(commands.Bot):
             
             await interaction.response.send_message(embed=make_embed(f"Warnings for {member.name}", desc, COLOR_WARNING), ephemeral=True)
 
-        @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds. (Owner Only)")
+        @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds.")
+        @app_commands.default_permissions(manage_channels=True)
         async def slowmode_slash(interaction: discord.Interaction, seconds: int):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "manage_channels"):
+                return
+            if seconds < 0:
+                return await interaction.response.send_message(embed=error_embed("Error", "Slowmode kan niet negatief zijn."), ephemeral=True)
             try:
                 await interaction.channel.edit(slowmode_delay=seconds)
                 await interaction.response.send_message(embed=success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds."))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to update slowmode: {e}"), ephemeral=True)
 
-        @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages. (Owner Only)")
+        @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages.")
+        @app_commands.default_permissions(manage_channels=True)
         async def lock_slash(interaction: discord.Interaction):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "manage_channels"):
+                return
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
                 await interaction.response.send_message(embed=success_embed("Channel Locked", "This channel has been locked."))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to lock channel: {e}"), ephemeral=True)
 
-        @self.tree.command(name="unlock", description="Unlock the current channel. (Owner Only)")
+        @self.tree.command(name="unlock", description="Unlock the current channel.")
+        @app_commands.default_permissions(manage_channels=True)
         async def unlock_slash(interaction: discord.Interaction):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "manage_channels"):
+                return
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
                 await interaction.response.send_message(embed=success_embed("Channel Unlocked", "This channel has been unlocked."))
-            except Exception as e:
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to unlock channel: {e}"), ephemeral=True)
 
-        @self.tree.command(name="say", description="Make the bot say something in the channel. (Owner Only)")
+        @self.tree.command(name="say", description="Make the bot say something in the channel.")
+        @app_commands.default_permissions(manage_messages=True)
         async def say_slash(interaction: discord.Interaction, message: str):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "manage_messages"):
+                return
             await interaction.response.send_message(embed=success_embed("Message Sent", "Done!"), ephemeral=True)
             await interaction.channel.send(message)
 
-        @self.tree.command(name="embed", description="Send a custom text inside an embed. (Owner Only)")
+        @self.tree.command(name="embed", description="Send a custom text inside an embed.")
+        @app_commands.default_permissions(manage_messages=True)
         async def embed_slash(interaction: discord.Interaction, title: str, description: str):
-            if not is_authorized(interaction):
-                return await interaction.response.send_message(embed=error_embed("Access Denied", "This command can only be used by the server owner."), ephemeral=True)
+            if not await check_permission_and_respond(interaction, "manage_messages"):
+                return
             await interaction.response.send_message(embed=success_embed("Embed Sent", "Done!"), ephemeral=True)
             await interaction.channel.send(embed=make_embed(title, description, COLOR_INFO))
 
         @self.tree.command(name="automod", description="Toggle or configure the AutoMod filter status.")
         @app_commands.default_permissions(administrator=True)
         async def automod_slash(interaction: discord.Interaction, status: bool):
+            if not await check_permission_and_respond(interaction, "administrator"):
+                return
             await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status) VALUES (?, ?)", (interaction.guild.id, status))
             await interaction.response.send_message(embed=success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`"))
 
         @self.tree.command(name="giveaway", description="Start a new server giveaway.")
         @app_commands.default_permissions(manage_guild=True)
         async def giveaway_slash(interaction: discord.Interaction, prize: str, duration_minutes: float):
+            if not await check_permission_and_respond(interaction, "manage_guild"):
+                return
+            if duration_minutes <= 0:
+                return await interaction.response.send_message(embed=error_embed("Error", "Giveaway duur moet groter zijn dan 0 minuten."), ephemeral=True)
             ends_at = time.time() + (duration_minutes * 60)
             embed = make_embed("🎉 GIVEAWAY 🎉", f"Prize: **{prize}**\nReact with 🎉 to enter!\nEnds: <t:{int(ends_at)}:R>", COLOR_PURPLE)
             await interaction.response.send_message(embed=success_embed("Giveaway Started", "Giveaway message deployed!"), ephemeral=True)
@@ -551,25 +612,38 @@ class ExtendedBotClient(commands.Bot):
         @self.tree.command(name="sticky", description="Create or clear a sticky message in the channel.")
         @app_commands.default_permissions(manage_messages=True)
         async def sticky_slash(interaction: discord.Interaction, text: Optional[str] = None):
+            if not await check_permission_and_respond(interaction, "manage_messages"):
+                return
             if not text:
-                if interaction.channel.id in sticky_messages:
-                    del sticky_messages[interaction.channel.id]
+                await db_controller.execute("DELETE FROM sticky_messages WHERE channel_id = ?", (interaction.channel.id,))
                 return await interaction.response.send_message(embed=success_embed("Sticky Removed", "Sticky message cleared for this channel."), ephemeral=True)
             
+            existing = await db_controller.fetchone("SELECT message_id FROM sticky_messages WHERE channel_id = ?", (interaction.channel.id,))
+            if existing and existing[0]:
+                try:
+                    old_msg = await interaction.channel.fetch_message(existing[0])
+                    await old_msg.delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+
             msg = await interaction.channel.send(embed=make_embed("Pinned Operational Notice", text))
-            sticky_messages[interaction.channel.id] = {"text": text, "message_id": msg.id}
+            await db_controller.execute("INSERT OR REPLACE INTO sticky_messages (channel_id, guild_id, text, message_id) VALUES (?, ?, ?, ?)", (interaction.channel.id, interaction.guild.id, text, msg.id))
             await interaction.response.send_message(embed=success_embed("Sticky Active", "Sticky message successfully deployed."), ephemeral=True)
 
         @self.tree.command(name="reactionrole", description="Bind a reaction emoji to a role on a message.")
         @app_commands.default_permissions(administrator=True)
         async def reactionrole_slash(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
+            if not await check_permission_and_respond(interaction, "administrator"):
+                return
             try:
                 m_id = int(message_id)
                 msg = await interaction.channel.fetch_message(m_id)
                 await msg.add_reaction(emoji)
                 await db_controller.execute("INSERT OR REPLACE INTO reaction_role_bindings (message_id, emoji_icon, role_id) VALUES (?, ?, ?)", (m_id, emoji, role.id))
                 await interaction.response.send_message(embed=success_embed("Reaction Role Bound", f"Successfully linked {emoji} to {role.mention} on message `{m_id}`."), ephemeral=True)
-            except Exception as e:
+            except ValueError:
+                await interaction.response.send_message(embed=error_embed("Error", "Ongeldige message ID opgegeven."), ephemeral=True)
+            except discord.HTTPException as e:
                 await interaction.response.send_message(embed=error_embed("Error", f"Failed to bind reaction role: {e}"), ephemeral=True)
 
         await self.tree.sync()
@@ -580,9 +654,62 @@ class ExtendedBotClient(commands.Bot):
         await self.set_status('online')
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
 
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.user_id or not payload.guild_id:
+            return
+        res = await db_controller.fetchone(
+            "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
+            (payload.message_id, str(payload.emoji))
+        )
+        if res:
+            guild = self.get_guild(payload.guild_id)
+            if guild:
+                role = guild.get_role(res[0])
+                member = guild.get_member(payload.user_id)
+                if role and member:
+                    try:
+                        await member.add_roles(role, reason="Reaction Role (Add)")
+                    except discord.HTTPException:
+                        pass
+
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        if payload.user_id == self.user_id or not payload.guild_id:
+            return
+        res = await db_controller.fetchone(
+            "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
+            (payload.message_id, str(payload.emoji))
+        )
+        if res:
+            guild = self.get_guild(payload.guild_id)
+            if guild:
+                role = guild.get_role(res[0])
+                member = guild.get_member(payload.user_id)
+                if role and member:
+                    try:
+                        await member.remove_roles(role, reason="Reaction Role (Remove)")
+                    except discord.HTTPException:
+                        pass
+
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
+
+        settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (message.guild.id,))
+        if settings and settings[0] and not message.author.guild_permissions.manage_messages:
+            if self.invite_link_regex.search(message.content):
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+                return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, server invite links are strictly prohibited."), delete_after=5)
+
+            letters = [c for c in message.content if c.isalpha()]
+            if len(letters) > 10 and sum(1 for c in letters if c.isupper()) / len(letters) > 0.8:
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+                return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, please avoid excessive capitalization."), delete_after=5)
 
         if self.user.mentioned_in(message) and not message.mention_everyone:
             current_time = time.time()
@@ -600,7 +727,7 @@ class ExtendedBotClient(commands.Bot):
             async with message.channel.typing():
                 if groq_api_client:
                     try:
-                        chat_completion = groq_api_client.chat.completions.create(
+                        chat_completion = await groq_api_client.chat.completions.create(
                             messages=[
                                 {
                                     "role": "user",
@@ -613,7 +740,12 @@ class ExtendedBotClient(commands.Bot):
                         if not reply_text:
                             await message.reply("Groq returned an empty response.")
                         else:
-                            await message.reply(reply_text[:1900])
+                            for i in range(0, len(reply_text), 1900):
+                                chunk = reply_text[i:i+1900]
+                                if i == 0:
+                                    await message.reply(chunk)
+                                else:
+                                    await message.channel.send(chunk)
                     except Exception as err:
                         traceback.print_exc()
                         err_msg = str(err)
@@ -624,26 +756,17 @@ class ExtendedBotClient(commands.Bot):
                 else:
                     await message.reply("Groq API key is not configured.")
 
-        settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (message.guild.id,))
-        if settings and settings[0] and not message.author.guild_permissions.manage_messages:
-            if self.invite_link_regex.search(message.content):
-                await message.delete()
-                return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, server invite links are strictly prohibited."), delete_after=5)
-
-            if len(message.content) > 10 and sum(1 for c in message.content if c.isupper()) / len(message.content) > 0.8:
-                await message.delete()
-                return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, please avoid excessive capitalization."), delete_after=5)
-
-        if message.channel.id in sticky_messages:
-            sticky_data = sticky_messages[message.channel.id]
-            if sticky_data.get("message_id"):
+        sticky_row = await db_controller.fetchone("SELECT text, message_id FROM sticky_messages WHERE channel_id = ?", (message.channel.id,))
+        if sticky_row:
+            sticky_text, old_msg_id = sticky_row
+            if old_msg_id:
                 try:
-                    old_msg = await message.channel.fetch_message(sticky_data["message_id"])
+                    old_msg = await message.channel.fetch_message(old_msg_id)
                     await old_msg.delete()
-                except Exception:
+                except (discord.NotFound, discord.HTTPException):
                     pass
-            new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_data["text"]))
-            sticky_messages[message.channel.id]["message_id"] = new_sticky.id
+            new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_text))
+            await db_controller.execute("UPDATE sticky_messages SET message_id = ? WHERE channel_id = ?", (new_sticky.id, message.channel.id))
 
         await self.process_commands(message)
 
