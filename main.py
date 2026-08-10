@@ -11,22 +11,22 @@ from typing import Optional
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-import aiosqlite
 from aiohttp import web
 from dotenv import load_dotenv
 from groq import AsyncGroq
 
+from database import db_controller
+
 load_dotenv()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
-DATABASE_NAME = os.getenv("DATABASE_PATH", "bot.db")
 WEB_PORT = int(os.getenv("PORT", 10000))
 GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
 
-# --- CONFIGURATION FOR STATUS CHANNELS ---
-CHANNEL_ONLINE_ID = 1533920905258995905   # 🟢 SPRITEGG ONLINE
-CHANNEL_UPDATING_ID = 1533921928224702685 # 🔵 SPRITEGG UPDATING
-CHANNEL_OFFLINE_ID = 1533922000005894224  # 🔴 SPRITEGG OFFLINE
+CHANNEL_ONLINE_ID = 1533920905258995905
+CHANNEL_UPDATING_ID = 1533921928224702685
+CHANNEL_OFFLINE_ID = 1533922000005894224
 
 COLOR_NEUTRAL = 0x2B2D31
 COLOR_SUCCESS = 0x2ECC71
@@ -88,191 +88,6 @@ def warning_embed(title: str, description: str) -> discord.Embed:
 def info_embed(title: str, description: str) -> discord.Embed:
     return make_embed(f"ℹ {title}", description, COLOR_INFO)
 
-class DatabaseController:
-    def __init__(self, db_path: str = DATABASE_NAME):
-        self.db_path = db_path
-
-    async def initialize_database(self):
-        async with aiosqlite.connect(self.db_path) as conn:
-            await conn.execute("PRAGMA journal_mode=WAL;")
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS warning_records (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER,
-                    target_id INTEGER,
-                    moderator_id INTEGER,
-                    reason TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS temporary_bans (
-                    guild_id INTEGER,
-                    target_id INTEGER,
-                    expiry_timestamp REAL,
-                    PRIMARY KEY (guild_id, target_id)
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS giveaway_system (
-                    message_id INTEGER PRIMARY KEY,
-                    channel_id INTEGER,
-                    guild_id INTEGER,
-                    prize_name TEXT,
-                    ends_at REAL,
-                    is_ended BOOLEAN DEFAULT 0
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS server_settings (
-                    guild_id INTEGER PRIMARY KEY,
-                    automod_status BOOLEAN DEFAULT 0
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS reaction_role_bindings (
-                    message_id INTEGER,
-                    emoji_icon TEXT,
-                    role_id INTEGER,
-                    PRIMARY KEY (message_id, emoji_icon)
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_vouches (
-                    guild_id INTEGER,
-                    target_id INTEGER,
-                    giver_id INTEGER,
-                    reason TEXT,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (guild_id, target_id, giver_id)
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS sticky_messages (
-                    channel_id INTEGER PRIMARY KEY,
-                    guild_id INTEGER,
-                    text TEXT,
-                    message_id INTEGER
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS sprites_data (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE,
-                    description TEXT
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS sprites (
-                    name TEXT PRIMARY KEY,
-                    rarity TEXT
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_inventory (
-                    user_id INTEGER,
-                    sprite_name TEXT,
-                    rarity TEXT,
-                    PRIMARY KEY (user_id, sprite_name)
-                )
-            """)
-            await conn.commit()
-
-        default_sprites = [
-            {"name": "John Wick", "rarity": "MYTHIC"}, {"name": "Batman", "rarity": "MYTHIC"},
-            {"name": "Cube Batman", "rarity": "SPECIAL"}, {"name": "Gold Batman", "rarity": "SPECIAL"},
-            {"name": "Gummy Batman", "rarity": "SPECIAL"}, {"name": "Galaxy Batman", "rarity": "SPECIAL"},
-            {"name": "Holofoil Batman", "rarity": "SPECIAL"}, {"name": "Water", "rarity": "SPECIAL"},
-            {"name": "Gold Water", "rarity": "SPECIAL"}, {"name": "Quack Water", "rarity": "SPECIAL"},
-            {"name": "Gummy Water", "rarity": "SPECIAL"}, {"name": "Galaxy Water", "rarity": "SPECIAL"},
-            {"name": "Gem Water", "rarity": "SPECIAL"}, {"name": "Holofoil Water", "rarity": "SPECIAL"},
-            {"name": "Earth", "rarity": "SPECIAL"}, {"name": "Cube Earth", "rarity": "SPECIAL"},
-            {"name": "Gold Earth", "rarity": "SPECIAL"}, {"name": "Quack Earth", "rarity": "SPECIAL"},
-            {"name": "Gummy Earth", "rarity": "SPECIAL"}, {"name": "Galaxy Earth", "rarity": "SPECIAL"},
-            {"name": "Gem Earth", "rarity": "SPECIAL"}, {"name": "Fire", "rarity": "RARE"},
-            {"name": "Cube Fire", "rarity": "SPECIAL"}, {"name": "Gold Fire", "rarity": "SPECIAL"},
-            {"name": "Quack Fire", "rarity": "SPECIAL"}, {"name": "Gummy Fire", "rarity": "SPECIAL"},
-            {"name": "Galaxy Fire", "rarity": "SPECIAL"}, {"name": "Holofoil Fire", "rarity": "SPECIAL"},
-            {"name": "Duck", "rarity": "EPIC"}, {"name": "Gold Duck", "rarity": "SPECIAL"},
-            {"name": "Gummy Duck", "rarity": "SPECIAL"}, {"name": "Galaxy Duck", "rarity": "SPECIAL"},
-            {"name": "Gem Duck", "rarity": "SPECIAL"}, {"name": "Ghost", "rarity": "EPIC"},
-            {"name": "Gold Ghost", "rarity": "SPECIAL"}, {"name": "Gummy Ghost", "rarity": "SPECIAL"},
-            {"name": "Galaxy Ghost", "rarity": "SPECIAL"}, {"name": "Holofoil Ghost", "rarity": "SPECIAL"},
-            {"name": "Dream", "rarity": "LEGENDARY"}, {"name": "Cube Dream", "rarity": "SPECIAL"},
-            {"name": "Gold Dream", "rarity": "SPECIAL"}, {"name": "Gummy Dream", "rarity": "SPECIAL"},
-            {"name": "Galaxy Dream", "rarity": "SPECIAL"}, {"name": "Demon", "rarity": "EPIC"},
-            {"name": "Punk", "rarity": "LEGENDARY"}, {"name": "Cube Punk", "rarity": "SPECIAL"},
-            {"name": "Gold Punk", "rarity": "SPECIAL"}, {"name": "Gummy Punk", "rarity": "SPECIAL"},
-            {"name": "Galaxy Punk", "rarity": "SPECIAL"}, {"name": "King", "rarity": "EPIC"},
-            {"name": "Gold King", "rarity": "SPECIAL"}, {"name": "Gummy King", "rarity": "SPECIAL"},
-            {"name": "Galaxy King", "rarity": "SPECIAL"}, {"name": "Holofoil King", "rarity": "SPECIAL"},
-            {"name": "Vini Jr.", "rarity": "MYTHIC"}, {"name": "Burnt Peanut", "rarity": "MYTHIC"},
-            {"name": "Zero Point", "rarity": "MYTHIC"}, {"name": "Cube Zero Point", "rarity": "SPECIAL"},
-            {"name": "Gold Zero Point", "rarity": "SPECIAL"}, {"name": "Quack Zero Point", "rarity": "SPECIAL"},
-            {"name": "Gummy Zero Point", "rarity": "SPECIAL"}, {"name": "Galaxy Zero Point", "rarity": "SPECIAL"},
-            {"name": "Gem Zero Point", "rarity": "SPECIAL"}, {"name": "Holofoil Zero Point", "rarity": "SPECIAL"},
-            {"name": "Fishy", "rarity": "SPECIAL"}, {"name": "Cube Fishy", "rarity": "SPECIAL"},
-            {"name": "Gold Fishy", "rarity": "SPECIAL"}, {"name": "Gummy Fishy", "rarity": "SPECIAL"},
-            {"name": "Galaxy Fishy", "rarity": "SPECIAL"}, {"name": "Striker", "rarity": "EPIC"},
-            {"name": "Gold Striker", "rarity": "SPECIAL"}, {"name": "Gummy Striker", "rarity": "SPECIAL"},
-            {"name": "Galaxy Striker", "rarity": "SPECIAL"}, {"name": "Holofoil Striker", "rarity": "SPECIAL"},
-            {"name": "Aura", "rarity": "EPIC"}, {"name": "Gold Aura", "rarity": "SPECIAL"},
-            {"name": "Gummy Aura", "rarity": "SPECIAL"}, {"name": "Galaxy Aura", "rarity": "SPECIAL"},
-            {"name": "Gem Aura", "rarity": "SPECIAL"}, {"name": "Boss", "rarity": "LEGENDARY"},
-            {"name": "Cube Boss", "rarity": "SPECIAL"}, {"name": "Gold Boss", "rarity": "SPECIAL"},
-            {"name": "Gummy Boss", "rarity": "SPECIAL"}, {"name": "Galaxy Boss", "rarity": "SPECIAL"},
-            {"name": "Grim", "rarity": "MYTHIC"}, {"name": "Cube Grim", "rarity": "SPECIAL"},
-            {"name": "Gold Grim", "rarity": "SPECIAL"}, {"name": "Gummy Grim", "rarity": "SPECIAL"},
-            {"name": "Galaxy Grim", "rarity": "SPECIAL"}, {"name": "Gem Grim", "rarity": "SPECIAL"},
-            {"name": "Holofoil Grim", "rarity": "SPECIAL"}, {"name": "Air", "rarity": "SPECIAL"},
-            {"name": "Gold Air", "rarity": "SPECIAL"}, {"name": "Gummy Air", "rarity": "SPECIAL"},
-            {"name": "Galaxy Air", "rarity": "SPECIAL"}, {"name": "Holofoil Air", "rarity": "SPECIAL"},
-            {"name": "Seven", "rarity": "LEGENDARY"}, {"name": "Gold Seven", "rarity": "SPECIAL"},
-            {"name": "Gummy Seven", "rarity": "SPECIAL"}, {"name": "Galaxy Seven", "rarity": "SPECIAL"},
-            {"name": "Holofoil Seven", "rarity": "SPECIAL"}, {"name": "Ironmouse", "rarity": "MYTHIC"},
-            {"name": "Pollo", "rarity": "MYTHIC"}, {"name": "Llama", "rarity": "LEGENDARY"},
-            {"name": "Gold Llama", "rarity": "SPECIAL"}, {"name": "Gummy Llama", "rarity": "SPECIAL"},
-            {"name": "Galaxy Llama", "rarity": "SPECIAL"}, {"name": "Gem Llama", "rarity": "SPECIAL"},
-            {"name": "Peely", "rarity": "LEGENDARY"}, {"name": "Gold Peely", "rarity": "SPECIAL"},
-            {"name": "Gummy Peely", "rarity": "SPECIAL"}, {"name": "Galaxy Peely", "rarity": "SPECIAL"},
-            {"name": "Holofoil Peely", "rarity": "SPECIAL"}
-        ]
-
-        async with aiosqlite.connect(self.db_path) as conn:
-            for sprite in default_sprites:
-                name = sprite.get("name")
-                rarity = sprite.get("rarity", "SPECIAL")
-                description = f"Rarity: {rarity}"
-                
-                await conn.execute(
-                    "INSERT OR REPLACE INTO sprites_data (name, description) VALUES (?, ?)",
-                    (name, description)
-                )
-                await conn.execute(
-                    "INSERT OR REPLACE INTO sprites (name, rarity) VALUES (?, ?)",
-                    (name, rarity)
-                )
-            await conn.commit()
-        print("Sprites successfully loaded into both database tables!")
-
-    async def execute(self, query: str, params: tuple = ()):
-        async with aiosqlite.connect(self.db_path) as conn:
-            cursor = await conn.execute(query, params)
-            await conn.commit()
-            return cursor
-
-    async def fetchone(self, query: str, params: tuple = ()):
-        async with aiosqlite.connect(self.db_path) as conn:
-            async with conn.execute(query, params) as cursor:
-                return await cursor.fetchone()
-
-    async def fetchall(self, query: str, params: tuple = ()):
-        async with aiosqlite.connect(self.db_path) as conn:
-            async with conn.execute(query, params) as cursor:
-                return await cursor.fetchall()
-
-db_controller = DatabaseController()
-
 class ExtendedBotClient(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -285,6 +100,8 @@ class ExtendedBotClient(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         
         self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
+        self.automod_cache = {}
+        self.sticky_locks = {}
 
     async def set_status(self, status: str):
         channel_mapping = {
@@ -314,47 +131,70 @@ class ExtendedBotClient(commands.Bot):
 
     @tasks.loop(minutes=1)
     async def background_giveaway_loop(self):
-        current_time = time.time()
-        rows = await db_controller.fetchall("SELECT message_id, channel_id, guild_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", (current_time,))
-        for row in rows:
-            msg_id, chan_id, guild_id, prize = row
-            await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
-            guild = self.get_guild(guild_id)
-            if not guild:
-                continue
-            channel = guild.get_channel(chan_id)
-            if not channel:
-                continue
-            try:
-                msg = await channel.fetch_message(msg_id)
-                users = []
-                for reaction in msg.reactions:
-                    if str(reaction.emoji) == "🎉":
-                        async for user in reaction.users():
-                            if not user.bot:
-                                users.append(user)
-                        break
-                if users:
-                    winner = random.choice(users)
-                    await channel.send(embed=success_embed("Giveaway Ended!", f"Congratulations {winner.mention}! You won the **{prize}**!"))
-                else:
-                    await channel.send(embed=info_embed("Giveaway Ended", f"Giveaway for **{prize}** ended, but no valid entries were found."))
-            except (discord.NotFound, discord.HTTPException):
-                pass
+        try:
+            current_time = time.time()
+            rows = await db_controller.fetchall("SELECT message_id, channel_id, guild_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", (current_time,))
+            for row in rows:
+                msg_id, chan_id, guild_id, prize = row
+                guild = self.get_guild(guild_id)
+                if not guild:
+                    continue
+                channel = guild.get_channel(chan_id)
+                if not channel:
+                    continue
+                try:
+                    msg = await channel.fetch_message(msg_id)
+                    users = []
+                    for reaction in msg.reactions:
+                        if str(reaction.emoji) == "🎉":
+                            async for user in reaction.users():
+                                if not user.bot:
+                                    users.append(user)
+                            break
+                    if users:
+                        winner = random.choice(users)
+                        await channel.send(embed=success_embed("Giveaway Ended!", f"Congratulations {winner.mention}! You won the **{prize}**!"))
+                    else:
+                        await channel.send(embed=info_embed("Giveaway Ended", f"Giveaway for **{prize}** ended, but no valid entries were found."))
+                    
+                    await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
+                except (discord.NotFound, discord.HTTPException) as api_err:
+                    print(f"Temporary API error while processing giveaway {msg_id}: {api_err}")
+                except Exception as loop_err:
+                    print(f"Error processing giveaway {msg_id}: {loop_err}")
+        except Exception as e:
+            print(f"Critical error in background_giveaway_loop: {e}")
+
+    @background_giveaway_loop.before_loop
+    async def before_giveaway_loop(self):
+        await self.wait_until_ready()
 
     @tasks.loop(minutes=1)
     async def background_tempban_loop(self):
-        current_time = time.time()
-        rows = await db_controller.fetchall("SELECT guild_id, target_id FROM temporary_bans WHERE expiry_timestamp <= ?", (current_time,))
-        for row in rows:
-            guild_id, target_id = row
-            guild = self.get_guild(guild_id)
-            if guild:
-                try:
-                    await guild.unban(discord.Object(id=target_id), reason="Temporary ban expired.")
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-            await db_controller.execute("DELETE FROM temporary_bans WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
+        try:
+            current_time = time.time()
+            rows = await db_controller.fetchall("SELECT guild_id, target_id FROM temporary_bans WHERE expiry_timestamp <= ?", (current_time,))
+            for row in rows:
+                guild_id, target_id = row
+                guild = self.get_guild(guild_id)
+                if guild:
+                    unbanned_successfully = False
+                    try:
+                        await guild.unban(discord.Object(id=target_id), reason="Temporary ban expired.")
+                        unbanned_successfully = True
+                    except discord.NotFound:
+                        unbanned_successfully = True
+                    except discord.HTTPException as http_err:
+                        print(f"HTTPException while unbanning target {target_id} in guild {guild_id}: {http_err}")
+                    
+                    if unbanned_successfully:
+                        await db_controller.execute("DELETE FROM temporary_bans WHERE guild_id = ? AND target_id = ?", (guild_id, target_id))
+        except Exception as e:
+            print(f"Critical error in background_tempban_loop: {e}")
+
+    @background_tempban_loop.before_loop
+    async def before_tempban_loop(self):
+        await self.wait_until_ready()
 
     async def setup_hook(self):
         await db_controller.initialize_database()
@@ -381,7 +221,7 @@ class ExtendedBotClient(commands.Bot):
                     "INSERT INTO user_vouches (guild_id, target_id, giver_id, reason) VALUES (?, ?, ?, ?)",
                     (interaction.guild.id, user.id, interaction.user.id, reason)
                 )
-            except aiosqlite.IntegrityError:
+            except Exception:
                 return await interaction.response.send_message(embed=error_embed("Already Vouched", f"You have already vouched for {user.mention} in this server."), ephemeral=True)
 
             res = await db_controller.fetchone(
@@ -419,7 +259,9 @@ class ExtendedBotClient(commands.Bot):
 
         @self.tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-            embed = error_embed("Command Error", str(error))
+            print(f"App command error: {error}")
+            traceback.print_exception(type(error), error, error.__traceback__)
+            embed = error_embed("Command Error", "An unexpected error occurred while processing this command.")
             if interaction.response.is_done():
                 await interaction.followup.send(embed=embed, ephemeral=True)
             else:
@@ -433,8 +275,8 @@ class ExtendedBotClient(commands.Bot):
             try:
                 await member.ban(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Banned", f"Successfully banned {member.mention}.\nReason: {reason}"))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to ban member: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to ban member due to an API error."), ephemeral=True)
 
         @self.tree.command(name="unban", description="Unban a user by their user ID.")
         @app_commands.default_permissions(ban_members=True)
@@ -447,8 +289,8 @@ class ExtendedBotClient(commands.Bot):
                 await interaction.response.send_message(embed=success_embed("User Unbanned", f"Successfully unbanned user ID `{user_id}`."))
             except ValueError:
                 await interaction.response.send_message(embed=error_embed("Error", "Ongeldige user ID opgegeven."), ephemeral=True)
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to unban user: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to unban user due to an API error."), ephemeral=True)
 
         @self.tree.command(name="tempban", description="Temporary ban a member from the server.")
         @app_commands.default_permissions(ban_members=True)
@@ -462,8 +304,8 @@ class ExtendedBotClient(commands.Bot):
                 await member.ban(reason=reason)
                 await db_controller.execute("INSERT OR REPLACE INTO temporary_bans (guild_id, target_id, expiry_timestamp) VALUES (?, ?, ?)", (interaction.guild.id, member.id, expiry))
                 await interaction.response.send_message(embed=success_embed("Temporary Ban Applied", f"Successfully banned {member.mention} for {duration_hours} hours."))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to temp-ban member: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to temp-ban member due to an API error."), ephemeral=True)
 
         @self.tree.command(name="kick", description="Kick a member from the server.")
         @app_commands.default_permissions(kick_members=True)
@@ -473,8 +315,8 @@ class ExtendedBotClient(commands.Bot):
             try:
                 await member.kick(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Kicked", f"Successfully kicked {member.mention}."))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to kick member: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to kick member due to an API error."), ephemeral=True)
 
         @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes.")
         @app_commands.default_permissions(moderate_members=True)
@@ -487,8 +329,8 @@ class ExtendedBotClient(commands.Bot):
                 until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
                 await member.timeout(until, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes."))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to timeout member: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to timeout member due to an API error."), ephemeral=True)
 
         @self.tree.command(name="untimeout", description="Remove timeout from a member.")
         @app_commands.default_permissions(moderate_members=True)
@@ -498,8 +340,8 @@ class ExtendedBotClient(commands.Bot):
             try:
                 await member.timeout(None, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Successfully removed timeout for {member.mention}."))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to remove timeout: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to remove timeout due to an API error."), ephemeral=True)
 
         @self.tree.command(name="purge", description="Bulk delete messages in the channel.")
         @app_commands.default_permissions(manage_messages=True)
@@ -546,8 +388,8 @@ class ExtendedBotClient(commands.Bot):
             try:
                 await interaction.channel.edit(slowmode_delay=seconds)
                 await interaction.response.send_message(embed=success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds."))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to update slowmode: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to update slowmode due to an API error."), ephemeral=True)
 
         @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages.")
         @app_commands.default_permissions(manage_channels=True)
@@ -557,8 +399,8 @@ class ExtendedBotClient(commands.Bot):
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
                 await interaction.response.send_message(embed=success_embed("Channel Locked", "This channel has been locked."))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to lock channel: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to lock channel due to an API error."), ephemeral=True)
 
         @self.tree.command(name="unlock", description="Unlock the current channel.")
         @app_commands.default_permissions(manage_channels=True)
@@ -568,8 +410,8 @@ class ExtendedBotClient(commands.Bot):
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
                 await interaction.response.send_message(embed=success_embed("Channel Unlocked", "This channel has been unlocked."))
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to unlock channel: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to unlock channel due to an API error."), ephemeral=True)
 
         @self.tree.command(name="say", description="Make the bot say something in the channel.")
         @app_commands.default_permissions(manage_messages=True)
@@ -593,6 +435,7 @@ class ExtendedBotClient(commands.Bot):
             if not await check_permission_and_respond(interaction, "administrator"):
                 return
             await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status) VALUES (?, ?)", (interaction.guild.id, status))
+            self.automod_cache[interaction.guild.id] = status
             await interaction.response.send_message(embed=success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`"))
 
         @self.tree.command(name="giveaway", description="Start a new server giveaway.")
@@ -643,8 +486,8 @@ class ExtendedBotClient(commands.Bot):
                 await interaction.response.send_message(embed=success_embed("Reaction Role Bound", f"Successfully linked {emoji} to {role.mention} on message `{m_id}`."), ephemeral=True)
             except ValueError:
                 await interaction.response.send_message(embed=error_embed("Error", "Ongeldige message ID opgegeven."), ephemeral=True)
-            except discord.HTTPException as e:
-                await interaction.response.send_message(embed=error_embed("Error", f"Failed to bind reaction role: {e}"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to bind reaction role due to an API error."), ephemeral=True)
 
         await self.tree.sync()
         print("Slash commands synced.")
@@ -655,7 +498,7 @@ class ExtendedBotClient(commands.Bot):
         await self.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="over server security | /help"))
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        if payload.user_id == self.user_id or not payload.guild_id:
+        if payload.user_id == self.user.id or not payload.guild_id:
             return
         res = await db_controller.fetchone(
             "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
@@ -666,6 +509,11 @@ class ExtendedBotClient(commands.Bot):
             if guild:
                 role = guild.get_role(res[0])
                 member = guild.get_member(payload.user_id)
+                if not member:
+                    try:
+                        member = await guild.fetch_member(payload.user_id)
+                    except discord.HTTPException:
+                        member = None
                 if role and member:
                     try:
                         await member.add_roles(role, reason="Reaction Role (Add)")
@@ -673,7 +521,7 @@ class ExtendedBotClient(commands.Bot):
                         pass
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
-        if payload.user_id == self.user_id or not payload.guild_id:
+        if payload.user_id == self.user.id or not payload.guild_id:
             return
         res = await db_controller.fetchone(
             "SELECT role_id FROM reaction_role_bindings WHERE message_id = ? AND emoji_icon = ?",
@@ -684,6 +532,11 @@ class ExtendedBotClient(commands.Bot):
             if guild:
                 role = guild.get_role(res[0])
                 member = guild.get_member(payload.user_id)
+                if not member:
+                    try:
+                        member = await guild.fetch_member(payload.user_id)
+                    except discord.HTTPException:
+                        member = None
                 if role and member:
                     try:
                         await member.remove_roles(role, reason="Reaction Role (Remove)")
@@ -694,8 +547,12 @@ class ExtendedBotClient(commands.Bot):
         if message.author.bot or not message.guild:
             return
 
-        settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (message.guild.id,))
-        if settings and settings[0] and not message.author.guild_permissions.manage_messages:
+        guild_id = message.guild.id
+        if guild_id not in self.automod_cache:
+            settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (guild_id,))
+            self.automod_cache[guild_id] = bool(settings and settings[0])
+
+        if self.automod_cache[guild_id] and not message.author.guild_permissions.manage_messages:
             if self.invite_link_regex.search(message.content):
                 try:
                     await message.delete()
@@ -752,30 +609,39 @@ class ExtendedBotClient(commands.Bot):
                         if "429" in err_msg or "rate_limit" in err_msg.lower():
                             await message.reply("API rate limit reached. Please try your request again shortly.")
                         else:
-                            await message.reply(f"AI error encountered: `{type(err).__name__}`")
+                            await message.reply("An error occurred while communicating with the AI model.")
                 else:
                     await message.reply("Groq API key is not configured.")
 
-        sticky_row = await db_controller.fetchone("SELECT text, message_id FROM sticky_messages WHERE channel_id = ?", (message.channel.id,))
-        if sticky_row:
-            sticky_text, old_msg_id = sticky_row
-            if old_msg_id:
-                try:
-                    old_msg = await message.channel.fetch_message(old_msg_id)
-                    await old_msg.delete()
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-            new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_text))
-            await db_controller.execute("UPDATE sticky_messages SET message_id = ? WHERE channel_id = ?", (new_sticky.id, message.channel.id))
+        if message.channel.id not in self.sticky_locks:
+            self.sticky_locks[message.channel.id] = asyncio.Lock()
+
+        async with self.sticky_locks[message.channel.id]:
+            sticky_row = await db_controller.fetchone("SELECT text, message_id FROM sticky_messages WHERE channel_id = ?", (message.channel.id,))
+            if sticky_row:
+                sticky_text, old_msg_id = sticky_row
+                if old_msg_id:
+                    try:
+                        old_msg = await message.channel.fetch_message(old_msg_id)
+                        await old_msg.delete()
+                    except (discord.NotFound, discord.HTTPException):
+                        pass
+                new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_text))
+                await db_controller.execute("UPDATE sticky_messages SET message_id = ? WHERE channel_id = ?", (new_sticky.id, message.channel.id))
 
         await self.process_commands(message)
 
-async def handle_ping(request):
-    return web.Response(text="Bot is running and healthy!")
+async def handle_health(request):
+    client: ExtendedBotClient = request.app['bot']
+    if client.is_ready():
+        return web.Response(text="Bot is fully running, connected, and ready!", status=200)
+    else:
+        return web.Response(text="Bot is starting up...", status=503)
 
 async def start_web_server(client: ExtendedBotClient):
     app = web.Application()
-    app.router.add_get("/", handle_ping)
+    app['bot'] = client
+    app.router.add_get("/", handle_health)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
