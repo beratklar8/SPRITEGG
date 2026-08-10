@@ -98,6 +98,138 @@ async def send_dm_notification(member: discord.Member, action_title: str, reason
     except (discord.Forbidden, discord.HTTPException):
         pass
 
+# --- INTERACTIVE GIVEAWAY UI VIEWS ---
+
+class GiveawayLeaveView(discord.ui.View):
+    def __init__(self, active_view):
+        super().__init__(timeout=60)
+        self.active_view = active_view
+
+    @discord.ui.button(label="Leave Giveaway", style=discord.ButtonStyle.red)
+    async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user in self.active_view.participants:
+            self.active_view.participants.remove(interaction.user)
+            for child in self.active_view.children:
+                if child.custom_id == "enter_giveaway":
+                    count = len(self.active_view.participants)
+                    child.label = str(count) if count > 0 else None
+            
+            if self.active_view.message:
+                try:
+                    await self.active_view.message.edit(view=self.active_view)
+                except discord.HTTPException:
+                    pass
+
+            await interaction.response.send_message("You have successfully left the giveaway.", ephemeral=True)
+        else:
+            await interaction.response.send_message("You are not in this giveaway.", ephemeral=True)
+        self.stop()
+
+class GiveawayActiveView(discord.ui.View):
+    def __init__(self, prize, winners, end_time, host):
+        super().__init__(timeout=None)
+        self.prize = prize
+        self.winners = winners
+        self.end_time = end_time
+        self.host = host
+        self.participants = []
+        self.message = None
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="🎉", custom_id="enter_giveaway")
+    async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user in self.participants:
+            leave_view = GiveawayLeaveView(self)
+            await interaction.response.send_message(
+                "You've already entered this giveaway! If you would like to leave, click the \"Leave Giveaway\" button!", 
+                view=leave_view, 
+                ephemeral=True
+            )
+        else:
+            self.participants.append(interaction.user)
+            button.label = str(len(self.participants))
+            await interaction.message.edit(view=self)
+            await interaction.response.send_message(
+                f"Entry Confirmed!\nYour entry for the giveaway of **{self.prize}** is confirmed!\n\nPlease help me by voting 🐸", 
+                ephemeral=True
+            )
+
+    @discord.ui.button(label="Participants", style=discord.ButtonStyle.secondary, emoji="👥", custom_id="view_participants")
+    async def participants_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        desc = f"These are the members that have participated in the giveaway of **{self.prize}**:\n\n"
+        for idx, user in enumerate(self.participants, 1):
+            desc += f"{idx}. {user.mention} (1 entry)\n"
+        desc += f"\nTotal Participants: {len(self.participants)}"
+        
+        embed = make_embed("Giveaway Participants", desc, COLOR_INFO)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class GiveawaySetupView(discord.ui.View):
+    def __init__(self, prize, winners, duration, host, channel, end_color_hex, req_daily, req_weekly, req_monthly, req_total, bypass_role_id):
+        super().__init__(timeout=900)
+        self.prize = prize
+        self.winners = winners
+        self.duration = duration
+        self.host = host
+        self.channel = channel
+        self.end_color_hex = end_color_hex
+        self.req_daily = req_daily
+        self.req_weekly = req_weekly
+        self.req_monthly = req_monthly
+        self.req_total = req_total
+        self.bypass_role_id = bypass_role_id
+
+    @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="🛠️")
+    async def edit_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Editing is currently not active in this preview.", ephemeral=True)
+
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.green, emoji="▶️")
+    async def start_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ends_at = time.time() + (self.duration * 60)
+        timestamp = int(ends_at)
+        
+        desc = (
+            f"Click 🎉 button to enter!\n\n"
+            f"🎁 Prize: **{self.prize}**\n"
+            f"🏆 Winners: **{self.winners}**\n"
+            f"⏱️ Duration: **{self.duration}** minute(s)\n"
+            f"👤 Host: {self.host.mention}\n\n"
+            f"Ends at: <t:{timestamp}:R>"
+        )
+        
+        embed_color = int(self.end_color_hex.lstrip('#'), 16) if self.end_color_hex else COLOR_SUCCESS
+        embed = make_embed("🎉 GIVEAWAY ACTIVE 🎉", desc, embed_color)
+        
+        view = GiveawayActiveView(self.prize, self.winners, ends_at, self.host)
+        
+        try:
+            msg = await self.channel.send(embed=embed, view=view)
+            view.message = msg
+            
+            await db_controller.execute(
+                """INSERT INTO giveaway_system 
+                (message_id, channel_id, guild_id, prize_name, ends_at, winners, is_ended, 
+                 req_daily, req_weekly, req_monthly, req_total, bypass_role_id, end_color) 
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
+                (
+                    msg.id, self.channel.id, interaction.guild.id, self.prize, ends_at, self.winners,
+                    self.req_daily, self.req_weekly, self.req_monthly, 
+                    self.req_total, self.bypass_role_id, self.end_color_hex
+                )
+            )
+            
+            await interaction.response.edit_message(content="Giveaway started successfully and posted to channel!", embed=None, view=None)
+        except discord.HTTPException:
+            await interaction.response.edit_message(content="Failed to post giveaway due to a Discord API error.", embed=None, view=None)
+        
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red, emoji="✖️")
+    async def cancel_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Giveaway cancelled.", embed=None, view=None)
+        self.stop()
+
+# --- BOT CLIENT CLASS ---
+
 class ExtendedBotClient(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -160,19 +292,23 @@ class ExtendedBotClient(commands.Bot):
                 
                 try:
                     msg = await channel.fetch_message(msg_id)
-                    users_set = set()
-                    for reaction in msg.reactions:
-                        if str(reaction.emoji) == "🎉":
-                            async for user in reaction.users():
-                                if not user.bot:
-                                    users_set.add(user)
-                            break
+                    users_list = []
                     
-                    users = list(users_set)
+                    # Probeer deelnemers uit actieve UI views op te halen indien lokaal bekend, anders via fallback reacties indien gebruikt
+                    if msg.view and hasattr(msg.view, "participants"):
+                        users_list = msg.view.participants
+                    else:
+                        for reaction in msg.reactions:
+                            if str(reaction.emoji) == "🎉":
+                                async for user in reaction.users():
+                                    if not user.bot:
+                                        users_list.append(user)
+                                break
+                    
                     embed_color = int(end_color_hex.lstrip('#'), 16) if end_color_hex else COLOR_SUCCESS
 
-                    if users:
-                        selected_winners = random.sample(users, min(num_winners, len(users)))
+                    if users_list:
+                        selected_winners = random.sample(users_list, min(num_winners, len(users_list)))
                         winners_mention = "\n".join([winner.mention for winner in selected_winners])
                         
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n🏆 Winner(s):\n{winners_mention}\n\nCongratulations! 🎉"
@@ -181,6 +317,13 @@ class ExtendedBotClient(commands.Bot):
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n❌ No valid participants were found."
                         await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_WARNING))
                     
+                    # Verwijder/disable knoppen bij beëindiging
+                    if msg.components:
+                        for children in msg.components:
+                            for component in children.children:
+                                component.disabled = True
+                        await msg.edit(view=msg.view)
+
                     await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
                 except (discord.NotFound, discord.HTTPException) as api_err:
                     print(f"Temporary API error while processing giveaway {msg_id}: {api_err}")
@@ -281,25 +424,24 @@ class ExtendedBotClient(commands.Bot):
 
         self.tree.add_command(vouch_group)
 
-        # Giveaway Group Command Structure met alle gevraagde opties
+        # Giveaway Group Command Structure met instelbare Host en interactieve setup
         giveaway_group = app_commands.Group(name="giveaway", description="Manage giveaways.")
 
-        @giveaway_group.command(name="create", description="Create a new giveaway with extensive options.")
+        @giveaway_group.command(name="create", description="Create a new giveaway with setup panel.")
         @app_commands.default_permissions(manage_guild=True)
         @app_commands.describe(
             duration="Giveaway duration in minutes",
             winners="Number of winners",
             prize="Prize name/text",
             channel="Discord text channel where the giveaway should be posted",
-            use_template="Optional custom giveaway message template",
+            host="Optional user hosting the giveaway",
             required_daily_messages="Minimum required daily messages to enter",
             required_weekly_messages="Minimum required weekly messages to enter",
             required_monthly_messages="Minimum required monthly messages to enter",
             required_total_messages="Minimum required total messages to enter",
             requirement_bypass_role="Role that bypasses message requirements",
-            color="Embed color (Hex code like #2ECC71)",
-            end_color="Embed color when giveaway ends (Hex code)",
-            other_options="Any extra custom settings/notes"
+            color="Embed color (Hex code like #9B59B6)",
+            end_color="Embed color when giveaway ends (Hex code like #2ECC71)"
         )
         async def giveaway_create(
             interaction: discord.Interaction, 
@@ -307,15 +449,14 @@ class ExtendedBotClient(commands.Bot):
             winners: int, 
             prize: str, 
             channel: discord.TextChannel, 
-            use_template: Optional[str] = None,
+            host: Optional[discord.Member] = None,
             required_daily_messages: Optional[int] = 0,
             required_weekly_messages: Optional[int] = 0,
             required_monthly_messages: Optional[int] = 0,
             required_total_messages: Optional[int] = 0,
             requirement_bypass_role: Optional[discord.Role] = None,
             color: Optional[str] = "#9B59B6",
-            end_color: Optional[str] = "#2ECC71",
-            other_options: Optional[str] = None
+            end_color: Optional[str] = "#2ECC71"
         ):
             if not await check_permission_and_respond(interaction, "manage_guild"):
                 return
@@ -325,50 +466,41 @@ class ExtendedBotClient(commands.Bot):
             if winners < 1:
                 return await interaction.response.send_message(embed=error_embed("Error", "Winners must be at least 1."), ephemeral=True)
 
+            if host is None:
+                host = interaction.user
+
             bot_member = interaction.guild.me
             perms = channel.permissions_for(bot_member)
-            if not (perms.send_messages and perms.embed_links and perms.add_reactions):
-                return await interaction.response.send_message(embed=error_embed("Error", "I do not have permission to send messages, embed links, and add reactions in that channel."), ephemeral=True)
+            if not (perms.send_messages and perms.embed_links):
+                return await interaction.response.send_message(embed=error_embed("Error", "I do not have permission to send messages and embed links in that channel."), ephemeral=True)
 
-            ends_at = time.time() + (duration * 60)
-            timestamp = int(ends_at)
+            setup_desc = (
+                f"Click 🎉 button to enter!\n\n"
+                f"🎁 Prize: **{prize}**\n"
+                f"🏆 Winners: **{winners}**\n"
+                f"⏱️ Duration: **{duration}** minute(s)\n"
+                f"👤 Host: {host.mention}\n\n"
+                f"*Review settings below and click Start to launch.*"
+            )
 
-            if not use_template:
-                content = (
-                    "🎉 GIVEAWAY 🎉\n\n"
-                    f"🎁 Prize: **{prize}**\n\n"
-                    "React with 🎉 to enter!\n\n"
-                    f"🏆 Winners: **{winners}**\n"
-                    f"⏰ Ends: <t:{timestamp}:R>\n"
-                )
-                if other_options:
-                    content += f"📌 Note: {other_options}\n"
-                content += "\nGood luck everyone! 🍀"
-            else:
-                content = use_template.format(prize=prize, winners=winners, timestamp=timestamp, other_options=other_options or "")
+            embed_color = int(color.lstrip('#'), 16) if color else COLOR_PURPLE
+            setup_embed = make_embed("🛠️ Giveaway Setup Panel", setup_desc, embed_color)
+            
+            view = GiveawaySetupView(
+                prize=prize,
+                winners=winners,
+                duration=duration,
+                host=host,
+                channel=channel,
+                end_color_hex=end_color,
+                req_daily=required_daily_messages,
+                req_weekly=required_weekly_messages,
+                req_monthly=required_monthly_messages,
+                req_total=required_total_messages,
+                bypass_role_id=requirement_bypass_role.id if requirement_bypass_role else 0
+            )
 
-            try:
-                embed_color = int(color.lstrip('#'), 16) if color else COLOR_PURPLE
-                embed = make_embed("🎉 GIVEAWAY ACTIVE 🎉", content, embed_color)
-                
-                msg = await channel.send(embed=embed)
-                await msg.add_reaction("🎉")
-                
-                await db_controller.execute(
-                    """INSERT INTO giveaway_system 
-                    (message_id, channel_id, guild_id, prize_name, ends_at, winners, is_ended, 
-                     req_daily, req_weekly, req_monthly, req_total, bypass_role_id, end_color) 
-                    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        msg.id, channel.id, interaction.guild.id, prize, ends_at, winners,
-                        required_daily_messages, required_weekly_messages, required_monthly_messages, 
-                        required_total_messages, requirement_bypass_role.id if requirement_bypass_role else 0, end_color
-                    )
-                )
-                
-                await interaction.response.send_message(embed=success_embed("Giveaway Created", f"Giveaway successfully deployed in {channel.mention}!"), ephemeral=True)
-            except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to create giveaway due to a Discord API error."), ephemeral=True)
+            await interaction.response.send_message(embed=setup_embed, view=view, ephemeral=True)
 
         self.tree.add_command(giveaway_group)
 
