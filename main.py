@@ -143,9 +143,12 @@ class ExtendedBotClient(commands.Bot):
     async def background_giveaway_loop(self):
         try:
             current_time = time.time()
-            rows = await db_controller.fetchall("SELECT message_id, channel_id, guild_id, prize_name, winners FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", (current_time,))
+            rows = await db_controller.fetchall(
+                "SELECT message_id, channel_id, guild_id, prize_name, winners, end_color FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", 
+                (current_time,)
+            )
             for row in rows:
-                msg_id, chan_id, guild_id, prize, num_winners = row
+                msg_id, chan_id, guild_id, prize, num_winners, end_color_hex = row
                 guild = self.get_guild(guild_id)
                 if not guild:
                     await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
@@ -166,13 +169,14 @@ class ExtendedBotClient(commands.Bot):
                             break
                     
                     users = list(users_set)
-                    
+                    embed_color = int(end_color_hex.lstrip('#'), 16) if end_color_hex else COLOR_SUCCESS
+
                     if users:
                         selected_winners = random.sample(users, min(num_winners, len(users)))
                         winners_mention = "\n".join([winner.mention for winner in selected_winners])
                         
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n🏆 Winner(s):\n{winners_mention}\n\nCongratulations! 🎉"
-                        await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_SUCCESS))
+                        await channel.send(embed=make_embed("Giveaway Ended", ended_desc, embed_color))
                     else:
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n❌ No valid participants were found."
                         await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_WARNING))
@@ -277,19 +281,42 @@ class ExtendedBotClient(commands.Bot):
 
         self.tree.add_command(vouch_group)
 
-        # Giveaway Group Command Structure
+        # Giveaway Group Command Structure met alle gevraagde opties
         giveaway_group = app_commands.Group(name="giveaway", description="Manage giveaways.")
 
-        @giveaway_group.command(name="create", description="Create a new giveaway.")
+        @giveaway_group.command(name="create", description="Create a new giveaway with extensive options.")
         @app_commands.default_permissions(manage_guild=True)
         @app_commands.describe(
             duration="Giveaway duration in minutes",
             winners="Number of winners",
             prize="Prize name/text",
             channel="Discord text channel where the giveaway should be posted",
-            template="Optional custom giveaway message template"
+            use_template="Optional custom giveaway message template",
+            required_daily_messages="Minimum required daily messages to enter",
+            required_weekly_messages="Minimum required weekly messages to enter",
+            required_monthly_messages="Minimum required monthly messages to enter",
+            required_total_messages="Minimum required total messages to enter",
+            requirement_bypass_role="Role that bypasses message requirements",
+            color="Embed color (Hex code like #2ECC71)",
+            end_color="Embed color when giveaway ends (Hex code)",
+            other_options="Any extra custom settings/notes"
         )
-        async def giveaway_create(interaction: discord.Interaction, duration: float, winners: int, prize: str, channel: discord.TextChannel, template: Optional[str] = None):
+        async def giveaway_create(
+            interaction: discord.Interaction, 
+            duration: float, 
+            winners: int, 
+            prize: str, 
+            channel: discord.TextChannel, 
+            use_template: Optional[str] = None,
+            required_daily_messages: Optional[int] = 0,
+            required_weekly_messages: Optional[int] = 0,
+            required_monthly_messages: Optional[int] = 0,
+            required_total_messages: Optional[int] = 0,
+            requirement_bypass_role: Optional[discord.Role] = None,
+            color: Optional[str] = "#9B59B6",
+            end_color: Optional[str] = "#2ECC71",
+            other_options: Optional[str] = None
+        ):
             if not await check_permission_and_respond(interaction, "manage_guild"):
                 return
             
@@ -298,7 +325,6 @@ class ExtendedBotClient(commands.Bot):
             if winners < 1:
                 return await interaction.response.send_message(embed=error_embed("Error", "Winners must be at least 1."), ephemeral=True)
 
-            # Check permissions in the target channel
             bot_member = interaction.guild.me
             perms = channel.permissions_for(bot_member)
             if not (perms.send_messages and perms.embed_links and perms.add_reactions):
@@ -307,25 +333,37 @@ class ExtendedBotClient(commands.Bot):
             ends_at = time.time() + (duration * 60)
             timestamp = int(ends_at)
 
-            if not template:
+            if not use_template:
                 content = (
                     "🎉 GIVEAWAY 🎉\n\n"
                     f"🎁 Prize: **{prize}**\n\n"
                     "React with 🎉 to enter!\n\n"
                     f"🏆 Winners: **{winners}**\n"
-                    f"⏰ Ends: <t:{timestamp}:R>\n\n"
-                    "Good luck everyone! 🍀"
+                    f"⏰ Ends: <t:{timestamp}:R>\n"
                 )
+                if other_options:
+                    content += f"📌 Note: {other_options}\n"
+                content += "\nGood luck everyone! 🍀"
             else:
-                content = template.format(prize=prize, winners=winners, timestamp=timestamp)
+                content = use_template.format(prize=prize, winners=winners, timestamp=timestamp, other_options=other_options or "")
 
             try:
-                msg = await channel.send(content)
+                embed_color = int(color.lstrip('#'), 16) if color else COLOR_PURPLE
+                embed = make_embed("🎉 GIVEAWAY ACTIVE 🎉", content, embed_color)
+                
+                msg = await channel.send(embed=embed)
                 await msg.add_reaction("🎉")
                 
                 await db_controller.execute(
-                    "INSERT INTO giveaway_system (message_id, channel_id, guild_id, prize_name, ends_at, winners, is_ended) VALUES (?, ?, ?, ?, ?, ?, 0)",
-                    (msg.id, channel.id, interaction.guild.id, prize, ends_at, winners)
+                    """INSERT INTO giveaway_system 
+                    (message_id, channel_id, guild_id, prize_name, ends_at, winners, is_ended, 
+                     req_daily, req_weekly, req_monthly, req_total, bypass_role_id, end_color) 
+                    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        msg.id, channel.id, interaction.guild.id, prize, ends_at, winners,
+                        required_daily_messages, required_weekly_messages, required_monthly_messages, 
+                        required_total_messages, requirement_bypass_role.id if requirement_bypass_role else 0, end_color
+                    )
                 )
                 
                 await interaction.response.send_message(embed=success_embed("Giveaway Created", f"Giveaway successfully deployed in {channel.mention}!"), ephemeral=True)
