@@ -89,7 +89,6 @@ def info_embed(title: str, description: str) -> discord.Embed:
     return make_embed(f"ℹ {title}", description, COLOR_INFO)
 
 async def send_dm_notification(member: discord.Member, action_title: str, reason: str, guild_name: str, extra_info: Optional[str] = None):
-    """Hulpfunctie om een DM te sturen naar een gebruiker wanneer er een moderatie-actie plaatsvindt."""
     try:
         desc = f"You have received a **{action_title}** in **{guild_name}**.\n\n**Reason:** {reason}"
         if extra_info:
@@ -97,7 +96,6 @@ async def send_dm_notification(member: discord.Member, action_title: str, reason
         embed = make_embed(f"Notification: {action_title}", desc, COLOR_WARNING)
         await member.send(embed=embed)
     except (discord.Forbidden, discord.HTTPException):
-        # Gebruiker heeft DM's uitgeschakeld of bot geblokkeerd
         pass
 
 class ExtendedBotClient(commands.Bot):
@@ -145,29 +143,39 @@ class ExtendedBotClient(commands.Bot):
     async def background_giveaway_loop(self):
         try:
             current_time = time.time()
-            rows = await db_controller.fetchall("SELECT message_id, channel_id, guild_id, prize_name FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", (current_time,))
+            rows = await db_controller.fetchall("SELECT message_id, channel_id, guild_id, prize_name, winners FROM giveaway_system WHERE ends_at <= ? AND is_ended = 0", (current_time,))
             for row in rows:
-                msg_id, chan_id, guild_id, prize = row
+                msg_id, chan_id, guild_id, prize, num_winners = row
                 guild = self.get_guild(guild_id)
                 if not guild:
+                    await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
                     continue
                 channel = guild.get_channel(chan_id)
                 if not channel:
+                    await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
                     continue
+                
                 try:
                     msg = await channel.fetch_message(msg_id)
-                    users = []
+                    users_set = set()
                     for reaction in msg.reactions:
                         if str(reaction.emoji) == "🎉":
                             async for user in reaction.users():
                                 if not user.bot:
-                                    users.append(user)
+                                    users_set.add(user)
                             break
+                    
+                    users = list(users_set)
+                    
                     if users:
-                        winner = random.choice(users)
-                        await channel.send(embed=success_embed("Giveaway Ended!", f"Congratulations {winner.mention}! You won the **{prize}**!"))
+                        selected_winners = random.sample(users, min(num_winners, len(users)))
+                        winners_mention = "\n".join([winner.mention for winner in selected_winners])
+                        
+                        ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n🏆 Winner(s):\n{winners_mention}\n\nCongratulations! 🎉"
+                        await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_SUCCESS))
                     else:
-                        await channel.send(embed=info_embed("Giveaway Ended", f"Giveaway for **{prize}** ended, but no valid entries were found."))
+                        ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n❌ No valid participants were found."
+                        await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_WARNING))
                     
                     await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
                 except (discord.NotFound, discord.HTTPException) as api_err:
@@ -268,6 +276,63 @@ class ExtendedBotClient(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         self.tree.add_command(vouch_group)
+
+        # Giveaway Group Command Structure
+        giveaway_group = app_commands.Group(name="giveaway", description="Manage giveaways.")
+
+        @giveaway_group.command(name="create", description="Create a new giveaway.")
+        @app_commands.default_permissions(manage_guild=True)
+        @app_commands.describe(
+            duration="Giveaway duration in minutes",
+            winners="Number of winners",
+            prize="Prize name/text",
+            channel="Discord text channel where the giveaway should be posted",
+            template="Optional custom giveaway message template"
+        )
+        async def giveaway_create(interaction: discord.Interaction, duration: float, winners: int, prize: str, channel: discord.TextChannel, template: Optional[str] = None):
+            if not await check_permission_and_respond(interaction, "manage_guild"):
+                return
+            
+            if duration <= 0:
+                return await interaction.response.send_message(embed=error_embed("Error", "Duration must be greater than 0."), ephemeral=True)
+            if winners < 1:
+                return await interaction.response.send_message(embed=error_embed("Error", "Winners must be at least 1."), ephemeral=True)
+
+            # Check permissions in the target channel
+            bot_member = interaction.guild.me
+            perms = channel.permissions_for(bot_member)
+            if not (perms.send_messages and perms.embed_links and perms.add_reactions):
+                return await interaction.response.send_message(embed=error_embed("Error", "I do not have permission to send messages, embed links, and add reactions in that channel."), ephemeral=True)
+
+            ends_at = time.time() + (duration * 60)
+            timestamp = int(ends_at)
+
+            if not template:
+                content = (
+                    "🎉 GIVEAWAY 🎉\n\n"
+                    f"🎁 Prize: **{prize}**\n\n"
+                    "React with 🎉 to enter!\n\n"
+                    f"🏆 Winners: **{winners}**\n"
+                    f"⏰ Ends: <t:{timestamp}:R>\n\n"
+                    "Good luck everyone! 🍀"
+                )
+            else:
+                content = template.format(prize=prize, winners=winners, timestamp=timestamp)
+
+            try:
+                msg = await channel.send(content)
+                await msg.add_reaction("🎉")
+                
+                await db_controller.execute(
+                    "INSERT INTO giveaway_system (message_id, channel_id, guild_id, prize_name, ends_at, winners, is_ended) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    (msg.id, channel.id, interaction.guild.id, prize, ends_at, winners)
+                )
+                
+                await interaction.response.send_message(embed=success_embed("Giveaway Created", f"Giveaway successfully deployed in {channel.mention}!"), ephemeral=True)
+            except discord.HTTPException:
+                await interaction.response.send_message(embed=error_embed("Error", "Failed to create giveaway due to a Discord API error."), ephemeral=True)
+
+        self.tree.add_command(giveaway_group)
 
         @self.tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -454,20 +519,6 @@ class ExtendedBotClient(commands.Bot):
             await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status) VALUES (?, ?)", (interaction.guild.id, status))
             self.automod_cache[interaction.guild.id] = status
             await interaction.response.send_message(embed=success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`"))
-
-        @self.tree.command(name="giveaway", description="Start a new server giveaway.")
-        @app_commands.default_permissions(manage_guild=True)
-        async def giveaway_slash(interaction: discord.Interaction, prize: str, duration_minutes: float):
-            if not await check_permission_and_respond(interaction, "manage_guild"):
-                return
-            if duration_minutes <= 0:
-                return await interaction.response.send_message(embed=error_embed("Error", "Giveaway duur moet groter zijn dan 0 minuten."), ephemeral=True)
-            ends_at = time.time() + (duration_minutes * 60)
-            embed = make_embed("🎉 GIVEAWAY 🎉", f"Prize: **{prize}**\nReact with 🎉 to enter!\nEnds: <t:{int(ends_at)}:R>", COLOR_PURPLE)
-            await interaction.response.send_message(embed=success_embed("Giveaway Started", "Giveaway message deployed!"), ephemeral=True)
-            msg = await interaction.channel.send(embed=embed)
-            await msg.add_reaction("🎉")
-            await db_controller.execute("INSERT INTO giveaway_system (message_id, channel_id, guild_id, prize_name, ends_at) VALUES (?, ?, ?, ?, ?)", (msg.id, interaction.channel.id, interaction.guild.id, prize, ends_at))
 
         @self.tree.command(name="sticky", description="Create or clear a sticky message in the channel.")
         @app_commands.default_permissions(manage_messages=True)
