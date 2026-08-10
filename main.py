@@ -88,6 +88,18 @@ def warning_embed(title: str, description: str) -> discord.Embed:
 def info_embed(title: str, description: str) -> discord.Embed:
     return make_embed(f"ℹ {title}", description, COLOR_INFO)
 
+async def send_dm_notification(member: discord.Member, action_title: str, reason: str, guild_name: str, extra_info: Optional[str] = None):
+    """Hulpfunctie om een DM te sturen naar een gebruiker wanneer er een moderatie-actie plaatsvindt."""
+    try:
+        desc = f"You have received a **{action_title}** in **{guild_name}**.\n\n**Reason:** {reason}"
+        if extra_info:
+            desc += f"\n**Details:** {extra_info}"
+        embed = make_embed(f"Notification: {action_title}", desc, COLOR_WARNING)
+        await member.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        # Gebruiker heeft DM's uitgeschakeld of bot geblokkeerd
+        pass
+
 class ExtendedBotClient(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -273,6 +285,7 @@ class ExtendedBotClient(commands.Bot):
             if not await check_permission_and_respond(interaction, "ban_members"):
                 return
             try:
+                await send_dm_notification(member, "Ban", reason, interaction.guild.name)
                 await member.ban(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Banned", f"Successfully banned {member.mention}.\nReason: {reason}"))
             except discord.HTTPException:
@@ -301,6 +314,7 @@ class ExtendedBotClient(commands.Bot):
                 return await interaction.response.send_message(embed=error_embed("Error", "Duur moet groter zijn dan 0 uur."), ephemeral=True)
             expiry = time.time() + (duration_hours * 3600)
             try:
+                await send_dm_notification(member, "Temporary Ban", reason, interaction.guild.name, f"Duration: {duration_hours} hours")
                 await member.ban(reason=reason)
                 await db_controller.execute("INSERT OR REPLACE INTO temporary_bans (guild_id, target_id, expiry_timestamp) VALUES (?, ?, ?)", (interaction.guild.id, member.id, expiry))
                 await interaction.response.send_message(embed=success_embed("Temporary Ban Applied", f"Successfully banned {member.mention} for {duration_hours} hours."))
@@ -313,6 +327,7 @@ class ExtendedBotClient(commands.Bot):
             if not await check_permission_and_respond(interaction, "kick_members"):
                 return
             try:
+                await send_dm_notification(member, "Kick", reason, interaction.guild.name)
                 await member.kick(reason=reason)
                 await interaction.response.send_message(embed=success_embed("Member Kicked", f"Successfully kicked {member.mention}."))
             except discord.HTTPException:
@@ -326,6 +341,7 @@ class ExtendedBotClient(commands.Bot):
             if minutes <= 0:
                 return await interaction.response.send_message(embed=error_embed("Error", "Aantal minuten moet groter zijn dan 0."), ephemeral=True)
             try:
+                await send_dm_notification(member, "Timeout", reason, interaction.guild.name, f"Duration: {minutes} minutes")
                 until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
                 await member.timeout(until, reason=reason)
                 await interaction.response.send_message(embed=success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes."))
@@ -359,6 +375,7 @@ class ExtendedBotClient(commands.Bot):
         async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str):
             if not await check_permission_and_respond(interaction, "moderate_members"):
                 return
+            await send_dm_notification(member, "Warning", reason, interaction.guild.name)
             await db_controller.execute("INSERT INTO warning_records (guild_id, target_id, moderator_id, reason) VALUES (?, ?, ?, ?)", (interaction.guild.id, member.id, interaction.user.id, reason))
             await interaction.response.send_message(embed=success_embed("Warning Issued", f"Warned {member.mention} for: {reason}"))
 
