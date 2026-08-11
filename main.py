@@ -15,7 +15,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 from groq import AsyncGroq
 
-from database import db_controller
+from database import DatabaseController
 
 load_dotenv()
 
@@ -23,6 +23,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 WEB_PORT = int(os.getenv("PORT", 10000))
 GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
+
+# Initialiseer hier het database controller object om importproblemen te voorkomen
+db_controller = DatabaseController()
 
 CHANNEL_ONLINE_ID = 1533920905258995905
 CHANNEL_UPDATING_ID = 1533921928224702685
@@ -364,8 +367,11 @@ class ExtendedBotClient(commands.Bot):
     async def setup_hook(self):
         await db_controller.initialize_database()
         
-        await self.load_extension("Sprites")
-        print("Sprites cog successfully loaded.")
+        try:
+            await self.load_extension("Sprites")
+            print("Sprites cog successfully loaded.")
+        except Exception as e:
+            print(f"Could not load Sprites cog (skipping): {e}")
         
         await self.set_status('updating')
 
