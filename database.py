@@ -125,23 +125,10 @@ class DatabaseController:
                         PRIMARY KEY (discord_id, sprite_id)
                     )
                 """)
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS trades (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        seller_id INTEGER,
-                        buyer_id INTEGER,
-                        status TEXT DEFAULT 'pending',
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS trade_items (
-                        trade_id INTEGER,
-                        user_id INTEGER,
-                        sprite_id TEXT
-                    )
-                """)
+                
+                # Opgelost: 'CREATE' toegevoegd aan de index query zodat het geen syntax error geeft
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_giveaway_participants_msg ON giveaway_participants(message_id);")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_user_activity_lookup ON user_activity(guild_id, user_id);")
                 await conn.commit()
 
     async def execute(self, query: str, params: tuple = ()):
