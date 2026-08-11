@@ -6,8 +6,10 @@ import random
 import asyncio
 import datetime
 import traceback
+import secrets
 from typing import Optional
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -15,7 +17,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 from groq import AsyncGroq
 
-from database import DatabaseController
+from database import DatabaseController, aiosqlite
 
 load_dotenv()
 
@@ -51,6 +53,17 @@ if GROQ_API_SECRET:
 
 user_cooldowns = {}
 oauth_states = {}
+
+def validate_hex_color(color_str: str, default: int) -> int:
+    if not color_str or not isinstance(color_str, str):
+        return default
+    cleaned = color_str.strip().lstrip('#')
+    if len(cleaned) == 6 and all(c in "0123456789abcdefABCDEF" for c in cleaned):
+        try:
+            return int(cleaned, 16)
+        except ValueError:
+            pass
+    return default
 
 def is_owner_or_special(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
@@ -146,19 +159,23 @@ class GiveawayActiveView(discord.ui.View):
         self.end_time = end_time
         self.host = host
         self.message = None
+        self._entry_lock = asyncio.Lock()
 
     @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="🎉", custom_id="enter_giveaway")
     async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.guild:
             return await interaction.response.send_message("This giveaway can only be entered inside a server.", ephemeral=True)
 
-        giveaway_info = await db_controller.fetchone(
-            "SELECT req_daily, req_weekly, req_monthly, req_total, bypass_role_id FROM giveaway_system WHERE message_id = ?",
-            (self.message_id,)
-        )
+        async with self._entry_lock:
+            giveaway_info = await db_controller.fetchone(
+                "SELECT req_daily, req_weekly, req_monthly, req_total, bypass_role_id, is_ended FROM giveaway_system WHERE message_id = ?",
+                (self.message_id,)
+            )
 
-        if giveaway_info:
-            req_daily, req_weekly, req_monthly, req_total, bypass_role_id = giveaway_info
+            if not giveaway_info or giveaway_info[5] == 1:
+                return await interaction.response.send_message("This giveaway has already ended or no longer exists.", ephemeral=True)
+
+            req_daily, req_weekly, req_monthly, req_total, bypass_role_id, _ = giveaway_info
             bypass = False
             if bypass_role_id and isinstance(interaction.user, discord.Member):
                 if any(role.id == bypass_role_id for role in interaction.user.roles):
@@ -166,29 +183,37 @@ class GiveawayActiveView(discord.ui.View):
 
             if not bypass and (req_daily > 0 or req_weekly > 0 or req_monthly > 0 or req_total > 0):
                 activity = await db_controller.fetchone(
-                    "SELECT message_count FROM user_activity WHERE guild_id = ? AND user_id = ?",
+                    "SELECT message_count, last_active FROM user_activity WHERE guild_id = ? AND user_id = ?",
                     (interaction.guild.id, interaction.user.id)
                 )
                 user_msgs = activity[0] if activity else 0
+                last_active_date = activity[1] if activity else ""
+                today_str = datetime.date.today().isoformat()
+
                 if req_total > 0 and user_msgs < req_total:
                     return await interaction.response.send_message(
-                        f"You do not meet the message requirements to enter this giveaway. Required total messages: **{req_total}**, you have: **{user_msgs}**.",
+                        f"You do not meet the total message requirement. Required: **{req_total}**, you have: **{user_msgs}**.",
+                        ephemeral=True
+                    )
+                if req_daily > 0 and (last_active_date != today_str or user_msgs < req_daily):
+                    return await interaction.response.send_message(
+                        f"You do not meet the daily message requirement for today.",
                         ephemeral=True
                     )
 
-        existing = await db_controller.fetchone(
-            "SELECT 1 FROM giveaway_participants WHERE message_id = ? AND user_id = ?",
-            (self.message_id, interaction.user.id)
-        )
-
-        if existing:
-            leave_view = GiveawayLeaveView(self)
-            await interaction.response.send_message(
-                "You've already entered this giveaway! If you would like to leave, click the \"Leave Giveaway\" button!", 
-                view=leave_view, 
-                ephemeral=True
+            existing = await db_controller.fetchone(
+                "SELECT 1 FROM giveaway_participants WHERE message_id = ? AND user_id = ?",
+                (self.message_id, interaction.user.id)
             )
-        else:
+
+            if existing:
+                leave_view = GiveawayLeaveView(self)
+                return await interaction.response.send_message(
+                    "You've already entered this giveaway! If you would like to leave, click the button below.", 
+                    view=leave_view, 
+                    ephemeral=True
+                )
+
             await db_controller.execute(
                 "INSERT OR IGNORE INTO giveaway_participants (message_id, user_id) VALUES (?, ?)",
                 (self.message_id, interaction.user.id)
@@ -198,9 +223,14 @@ class GiveawayActiveView(discord.ui.View):
                 (self.message_id,)
             )
             button.label = str(len(rows))
-            await interaction.message.edit(view=self)
+            if interaction.message:
+                try:
+                    await interaction.message.edit(view=self)
+                except discord.HTTPException:
+                    pass
+
             await interaction.response.send_message(
-                f"Entry Confirmed!\nYour entry for the giveaway of **{self.prize}** is confirmed!\n\nPlease help me by voting 🐸", 
+                f"Entry Confirmed!\nYour entry for the giveaway of **{self.prize}** is confirmed!", 
                 ephemeral=True
             )
 
@@ -210,9 +240,9 @@ class GiveawayActiveView(discord.ui.View):
             "SELECT user_id FROM giveaway_participants WHERE message_id = ?",
             (self.message_id,)
         )
-        desc = f"These are the members that have participated in the giveaway of **{self.prize}**:\n\n"
+        desc = f"Participants for the giveaway of **{self.prize}**:\n\n"
         for idx, row in enumerate(rows[:25], 1):
-            desc += f"{idx}. <@{row[0]}> (1 entry)\n"
+            desc += f"{idx}. <@{row[0]}>\n"
         if len(rows) > 25:
             desc += f"\n...and {len(rows) - 25} more participants."
         desc += f"\nTotal Participants: {len(rows)}"
@@ -253,7 +283,7 @@ class GiveawaySetupView(discord.ui.View):
             f"Ends at: <t:{timestamp}:R>"
         )
         
-        embed_color = int(self.end_color_hex.lstrip('#'), 16) if self.end_color_hex else COLOR_SUCCESS
+        embed_color = validate_hex_color(self.end_color_hex, COLOR_SUCCESS)
         embed = make_embed("🎉 GIVEAWAY ACTIVE 🎉", desc, embed_color)
         
         try:
@@ -354,20 +384,20 @@ class ExtendedBotClient(commands.Bot):
                         "SELECT user_id FROM giveaway_participants WHERE message_id = ?",
                         (msg_id,)
                     )
-                    users_list = [guild.get_member(r[0]) or await guild.fetch_member(r[0]) for r in part_rows if guild.get_member(r[0]) or True]
-                    # Filter out None/failed fetches if necessary
+                    
                     valid_users = []
                     for uid_tuple in part_rows:
-                        u = guild.get_member(uid_tuple[0])
+                        uid = uid_tuple[0]
+                        u = guild.get_member(uid)
                         if not u:
                             try:
-                                u = await guild.fetch_member(uid_tuple[0])
+                                u = await guild.fetch_member(uid)
                             except discord.HTTPException:
                                 pass
                         if u:
                             valid_users.append(u)
 
-                    embed_color = int(end_color_hex.lstrip('#'), 16) if end_color_hex else COLOR_SUCCESS
+                    embed_color = validate_hex_color(end_color_hex, COLOR_SUCCESS)
 
                     if valid_users:
                         selected_winners = random.sample(valid_users, min(num_winners, len(valid_users)))
@@ -379,11 +409,14 @@ class ExtendedBotClient(commands.Bot):
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n❌ No valid participants were found."
                         await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_WARNING))
                     
-                    if msg.components:
-                        for children in msg.components:
-                            for component in children.children:
-                                component.disabled = True
-                        await msg.edit(view=msg.view)
+                    if msg:
+                        try:
+                            disabled_view = discord.ui.View()
+                            for child in msg.components:
+                                pass # Clear or disable appropriately if needed
+                            await msg.edit(view=None)
+                        except Exception:
+                            pass
 
                     await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
                 except (discord.NotFound, discord.HTTPException) as api_err:
@@ -458,7 +491,7 @@ class ExtendedBotClient(commands.Bot):
                     "INSERT INTO user_vouches (guild_id, target_id, giver_id, reason) VALUES (?, ?, ?, ?)",
                     (interaction.guild.id, user.id, interaction.user.id, reason)
                 )
-            except Exception:
+            except aiosqlite.IntegrityError:
                 return await interaction.response.send_message(embed=error_embed("Already Vouched", f"You have already vouched for {user.mention} in this server."), ephemeral=True)
 
             res = await db_controller.fetchone(
@@ -552,7 +585,7 @@ class ExtendedBotClient(commands.Bot):
                 f"*Review settings below and click Start to launch.*"
             )
 
-            embed_color = int(color.lstrip('#'), 16) if color else COLOR_PURPLE
+            embed_color = validate_hex_color(color, COLOR_PURPLE)
             setup_embed = make_embed("🛠️ Giveaway Setup Panel", setup_desc, embed_color)
             
             view = GiveawaySetupView(
@@ -601,7 +634,8 @@ class ExtendedBotClient(commands.Bot):
             if not await check_permission_and_respond(interaction, "ban_members"):
                 return
             try:
-                user_obj = discord.Object(id=int(user_id))
+                uid = int(user_id)
+                user_obj = discord.Object(id=uid)
                 await interaction.guild.unban(user_obj, reason=reason)
                 await interaction.response.send_message(embed=success_embed("User Unbanned", f"Successfully unbanned user ID `{user_id}`."))
             except ValueError:
@@ -637,13 +671,13 @@ class ExtendedBotClient(commands.Bot):
             except discord.HTTPException:
                 await interaction.response.send_message(embed=error_embed("Error", "Failed to kick member due to an API error."), ephemeral=True)
 
-        @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes.")
+        @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes (max 40320 min / 28 days).")
         @app_commands.default_permissions(moderate_members=True)
         async def timeout_slash(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: Optional[str] = "No reason provided"):
             if not await check_permission_and_respond(interaction, "moderate_members"):
                 return
-            if minutes <= 0:
-                return await interaction.response.send_message(embed=error_embed("Error", "Aantal minuten moet groter zijn dan 0."), ephemeral=True)
+            if minutes <= 0 or minutes > 40320:
+                return await interaction.response.send_message(embed=error_embed("Error", "Aantal minuten moet tussen 1 en 40320 (28 dagen) liggen."), ephemeral=True)
             try:
                 await send_dm_notification(member, "Timeout", reason, interaction.guild.name, f"Duration: {minutes} minutes")
                 until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
@@ -900,12 +934,7 @@ class ExtendedBotClient(commands.Bot):
                 if groq_api_client:
                     try:
                         chat_completion = await groq_api_client.chat.completions.create(
-                            messages=[
-                                {
-                                    "role": "user",
-                                    "content": clean_text,
-                                }
-                            ],
+                            messages=[{"role": "user", "content": clean_text}],
                             model="llama-3.3-70b-versatile",
                         )
                         reply_text = chat_completion.choices[0].message.content
@@ -946,7 +975,7 @@ class ExtendedBotClient(commands.Bot):
 
         await self.process_commands(message)
 
-# --- AIOHTTP WEB SERVER & EPIC OAUTH ENDPOINTS ---
+# --- AIOHTTP WEB SERVER & SECURED EPIC OAUTH ENDPOINTS ---
 
 async def handle_health(request):
     client: ExtendedBotClient = request.app['bot']
@@ -957,10 +986,10 @@ async def handle_health(request):
 
 async def handle_epic_login(request):
     discord_id = request.query.get("discord_id")
-    if not discord_id:
-        return web.Response(text="Missing discord_id parameter.", status=400)
+    if not discord_id or not discord_id.isdigit():
+        return web.Response(text="Missing or invalid discord_id parameter.", status=400)
     
-    state = f"{discord_id}_{random.randint(100000, 999999)}"
+    state = f"{discord_id}_{secrets.token_urlsafe(32)}"
     oauth_states[state] = float(time.time()) + 600
 
     if not EPIC_CLIENT_ID:
@@ -1003,21 +1032,22 @@ async def handle_epic_callback(request):
     access_token = token_data.get("access_token")
     refresh_token = token_data.get("refresh_token")
     epic_account_id = token_data.get("account_id", "unknown_epic_id")
-    epic_display_name = token_data.get("displayName", "EpicUser")
 
     await db_controller.execute(
         """INSERT OR REPLACE INTO epic_accounts 
-        (discord_id, epic_account_id, epic_display_name, access_token, refresh_token, updated_at) 
-        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-        (int(discord_id_str), epic_account_id, epic_display_name, access_token, refresh_token)
+        (discord_id, epic_account_id, access_token, refresh_token, updated_at) 
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+        (int(discord_id_str), epic_account_id, access_token, refresh_token)
     )
 
     return web.Response(text="Epic account successfully linked! You can now close this window and return to Discord.", status=200)
 
 async def handle_epic_unlink(request):
     discord_id = request.query.get("discord_id")
-    if discord_id:
-        await db_controller.execute("DELETE FROM epic_accounts WHERE discord_id = ?", (int(discord_id),))
+    if not discord_id or not discord_id.isdigit():
+        return web.Response(text="Missing or invalid discord_id parameter.", status=400)
+    
+    await db_controller.execute("DELETE FROM epic_accounts WHERE discord_id = ?", (int(discord_id),))
     return web.Response(text="Epic account unlinked successfully.", status=200)
 
 async def start_web_server(client: ExtendedBotClient):
@@ -1040,8 +1070,6 @@ async def main():
         start_web_server(client),
         client.start(BOT_TOKEN)
     )
-
-import aiohttp
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
