@@ -50,6 +50,22 @@ class DatabaseController:
                     )
                 """)
                 await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS giveaway_participants (
+                        message_id INTEGER,
+                        user_id INTEGER,
+                        PRIMARY KEY (message_id, user_id)
+                    )
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS user_activity (
+                        guild_id INTEGER,
+                        user_id INTEGER,
+                        message_count INTEGER DEFAULT 1,
+                        last_active DATE,
+                        PRIMARY KEY (guild_id, user_id)
+                    )
+                """)
+                await conn.execute("""
                     CREATE TABLE IF NOT EXISTS server_settings (
                         guild_id INTEGER PRIMARY KEY,
                         automod_status BOOLEAN DEFAULT 0
@@ -81,7 +97,6 @@ class DatabaseController:
                         message_id INTEGER
                     )
                 """)
-                # --- TABELLEN VOOR SPRITE TRADING ---
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS sprites (
                         id TEXT PRIMARY KEY,
