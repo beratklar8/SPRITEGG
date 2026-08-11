@@ -39,7 +39,14 @@ class DatabaseController:
                         guild_id INTEGER,
                         prize_name TEXT,
                         ends_at REAL,
-                        is_ended BOOLEAN DEFAULT 0
+                        winners INTEGER,
+                        is_ended BOOLEAN DEFAULT 0,
+                        req_daily INTEGER DEFAULT 0,
+                        req_weekly INTEGER DEFAULT 0,
+                        req_monthly INTEGER DEFAULT 0,
+                        req_total INTEGER DEFAULT 0,
+                        bypass_role_id INTEGER DEFAULT 0,
+                        end_color TEXT
                     )
                 """)
                 await conn.execute("""
@@ -74,7 +81,7 @@ class DatabaseController:
                         message_id INTEGER
                     )
                 """)
-                # --- NIEUWE TABELLEN VOOR SPRITE TRADING ---
+                # --- TABELLEN VOOR SPRITE TRADING ---
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS sprites (
                         id TEXT PRIMARY KEY,
@@ -140,5 +147,3 @@ class DatabaseController:
             async with aiosqlite.connect(self.db_path) as conn:
                 async with conn.execute(query, params) as cursor:
                     return await cursor.fetchall()
-
-db_controller = DatabaseController()
