@@ -294,7 +294,6 @@ class ExtendedBotClient(commands.Bot):
                     msg = await channel.fetch_message(msg_id)
                     users_list = []
                     
-                    # Probeer deelnemers uit actieve UI views op te halen indien lokaal bekend, anders via fallback reacties indien gebruikt
                     if msg.view and hasattr(msg.view, "participants"):
                         users_list = msg.view.participants
                     else:
@@ -317,7 +316,6 @@ class ExtendedBotClient(commands.Bot):
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n❌ No valid participants were found."
                         await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_WARNING))
                     
-                    # Verwijder/disable knoppen bij beëindiging
                     if msg.components:
                         for children in msg.components:
                             for component in children.children:
@@ -424,7 +422,6 @@ class ExtendedBotClient(commands.Bot):
 
         self.tree.add_command(vouch_group)
 
-        # Giveaway Group Command Structure met instelbare Host en interactieve setup
         giveaway_group = app_commands.Group(name="giveaway", description="Manage giveaways.")
 
         @giveaway_group.command(name="create", description="Create a new giveaway with setup panel.")
@@ -869,6 +866,8 @@ class ExtendedBotClient(commands.Bot):
 
         await self.process_commands(message)
 
+# --- AIOHTTP WEB SERVER & EPIC OAUTH ENDPOINTS ---
+
 async def handle_health(request):
     client: ExtendedBotClient = request.app['bot']
     if client.is_ready():
@@ -876,10 +875,34 @@ async def handle_health(request):
     else:
         return web.Response(text="Bot is starting up...", status=503)
 
+async def handle_epic_login(request):
+    discord_id = request.query.get("discord_id")
+    return web.Response(text=f"Epic OAuth Login Endpoint. Linking for Discord ID: {discord_id}. Configure your Epic OAuth client here.", status=200)
+
+async def handle_epic_callback(request):
+    discord_id = request.query.get("state")
+    code = request.query.get("code")
+    if discord_id:
+        await db_controller.execute(
+            "INSERT OR REPLACE INTO epic_accounts (discord_id, epic_account_id, epic_display_name) VALUES (?, ?, ?)",
+            (int(discord_id), "epic_mock_id_123", "FortnitePlayer123")
+        )
+    return web.Response(text="Epic account successfully linked! You can now close this window and return to Discord.", status=200)
+
+async def handle_epic_unlink(request):
+    discord_id = request.query.get("discord_id")
+    if discord_id:
+        await db_controller.execute("DELETE FROM epic_accounts WHERE discord_id = ?", (int(discord_id),))
+    return web.Response(text="Epic account unlinked successfully.", status=200)
+
 async def start_web_server(client: ExtendedBotClient):
     app = web.Application()
     app['bot'] = client
     app.router.add_get("/", handle_health)
+    app.router.add_get("/epic/login", handle_epic_login)
+    app.router.add_get("/epic/callback", handle_epic_callback)
+    app.router.add_get("/epic/unlink", handle_epic_unlink)
+    
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
