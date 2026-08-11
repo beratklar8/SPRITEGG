@@ -39,7 +39,14 @@ class DatabaseController:
                         guild_id INTEGER,
                         prize_name TEXT,
                         ends_at REAL,
-                        is_ended BOOLEAN DEFAULT 0
+                        winners INTEGER,
+                        is_ended BOOLEAN DEFAULT 0,
+                        req_daily INTEGER DEFAULT 0,
+                        req_weekly INTEGER DEFAULT 0,
+                        req_monthly INTEGER DEFAULT 0,
+                        req_total INTEGER DEFAULT 0,
+                        bypass_role_id INTEGER DEFAULT 0,
+                        end_color TEXT
                     )
                 """)
                 await conn.execute("""
@@ -74,10 +81,48 @@ class DatabaseController:
                         message_id INTEGER
                     )
                 """)
+                # --- NIEUWE TABELLEN VOOR SPRITE TRADING ---
                 await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS sprites (
-                        name TEXT PRIMARY KEY,
-                        rarity TEXT NOT NULL
+                    CREATE TABLE IF NOT EXISTS epic_accounts (
+                        discord_id INTEGER PRIMARY KEY,
+                        epic_account_id TEXT UNIQUE,
+                        epic_display_name TEXT,
+                        access_token TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS user_sprites (
+                        discord_id INTEGER,
+                        sprite_id TEXT,
+                        obtained_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (discord_id, sprite_id)
+                    )
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sprite_catalog (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        rarity TEXT NOT NULL,
+                        image TEXT,
+                        released BOOLEAN DEFAULT 1
+                    )
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS trades (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        seller_id INTEGER,
+                        buyer_id INTEGER,
+                        status TEXT DEFAULT 'pending',
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS trade_items (
+                        trade_id INTEGER,
+                        user_id INTEGER,
+                        sprite_id TEXT
                     )
                 """)
                 await conn.commit()
