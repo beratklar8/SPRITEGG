@@ -23,8 +23,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 WEB_PORT = int(os.getenv("PORT", 10000))
 GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
+EPIC_CLIENT_ID = os.getenv("EPIC_CLIENT_ID", "")
+EPIC_CLIENT_SECRET = os.getenv("EPIC_CLIENT_SECRET", "")
+EPIC_REDIRECT_URI = os.getenv("EPIC_REDIRECT_URI", "http://localhost:10000/epic/callback")
 
-# Initialiseer hier het database controller object om importproblemen te voorkomen
 db_controller = DatabaseController()
 
 CHANNEL_ONLINE_ID = 1533920905258995905
@@ -48,6 +50,7 @@ if GROQ_API_SECRET:
         print(f"Failed to initialize Groq client: {initialization_exception}")
 
 user_cooldowns = {}
+oauth_states = {}
 
 def is_owner_or_special(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
@@ -110,37 +113,75 @@ class GiveawayLeaveView(discord.ui.View):
 
     @discord.ui.button(label="Leave Giveaway", style=discord.ButtonStyle.red)
     async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user in self.active_view.participants:
-            self.active_view.participants.remove(interaction.user)
-            for child in self.active_view.children:
-                if child.custom_id == "enter_giveaway":
-                    count = len(self.active_view.participants)
-                    child.label = str(count) if count > 0 else None
-            
-            if self.active_view.message:
-                try:
-                    await self.active_view.message.edit(view=self.active_view)
-                except discord.HTTPException:
-                    pass
+        await db_controller.execute(
+            "DELETE FROM giveaway_participants WHERE message_id = ? AND user_id = ?",
+            (self.active_view.message_id, interaction.user.id)
+        )
+        
+        rows = await db_controller.fetchall(
+            "SELECT user_id FROM giveaway_participants WHERE message_id = ?",
+            (self.active_view.message_id,)
+        )
+        count = len(rows)
 
-            await interaction.response.send_message("You have successfully left the giveaway.", ephemeral=True)
-        else:
-            await interaction.response.send_message("You are not in this giveaway.", ephemeral=True)
+        for child in self.active_view.children:
+            if child.custom_id == "enter_giveaway":
+                child.label = str(count) if count > 0 else None
+        
+        if self.active_view.message:
+            try:
+                await self.active_view.message.edit(view=self.active_view)
+            except discord.HTTPException:
+                pass
+
+        await interaction.response.send_message("You have successfully left the giveaway.", ephemeral=True)
         self.stop()
 
 class GiveawayActiveView(discord.ui.View):
-    def __init__(self, prize, winners, end_time, host):
+    def __init__(self, message_id, prize, winners, end_time, host):
         super().__init__(timeout=None)
+        self.message_id = message_id
         self.prize = prize
         self.winners = winners
         self.end_time = end_time
         self.host = host
-        self.participants = []
         self.message = None
 
     @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="🎉", custom_id="enter_giveaway")
     async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user in self.participants:
+        if not interaction.guild:
+            return await interaction.response.send_message("This giveaway can only be entered inside a server.", ephemeral=True)
+
+        giveaway_info = await db_controller.fetchone(
+            "SELECT req_daily, req_weekly, req_monthly, req_total, bypass_role_id FROM giveaway_system WHERE message_id = ?",
+            (self.message_id,)
+        )
+
+        if giveaway_info:
+            req_daily, req_weekly, req_monthly, req_total, bypass_role_id = giveaway_info
+            bypass = False
+            if bypass_role_id and isinstance(interaction.user, discord.Member):
+                if any(role.id == bypass_role_id for role in interaction.user.roles):
+                    bypass = True
+
+            if not bypass and (req_daily > 0 or req_weekly > 0 or req_monthly > 0 or req_total > 0):
+                activity = await db_controller.fetchone(
+                    "SELECT message_count FROM user_activity WHERE guild_id = ? AND user_id = ?",
+                    (interaction.guild.id, interaction.user.id)
+                )
+                user_msgs = activity[0] if activity else 0
+                if req_total > 0 and user_msgs < req_total:
+                    return await interaction.response.send_message(
+                        f"You do not meet the message requirements to enter this giveaway. Required total messages: **{req_total}**, you have: **{user_msgs}**.",
+                        ephemeral=True
+                    )
+
+        existing = await db_controller.fetchone(
+            "SELECT 1 FROM giveaway_participants WHERE message_id = ? AND user_id = ?",
+            (self.message_id, interaction.user.id)
+        )
+
+        if existing:
             leave_view = GiveawayLeaveView(self)
             await interaction.response.send_message(
                 "You've already entered this giveaway! If you would like to leave, click the \"Leave Giveaway\" button!", 
@@ -148,8 +189,15 @@ class GiveawayActiveView(discord.ui.View):
                 ephemeral=True
             )
         else:
-            self.participants.append(interaction.user)
-            button.label = str(len(self.participants))
+            await db_controller.execute(
+                "INSERT OR IGNORE INTO giveaway_participants (message_id, user_id) VALUES (?, ?)",
+                (self.message_id, interaction.user.id)
+            )
+            rows = await db_controller.fetchall(
+                "SELECT user_id FROM giveaway_participants WHERE message_id = ?",
+                (self.message_id,)
+            )
+            button.label = str(len(rows))
             await interaction.message.edit(view=self)
             await interaction.response.send_message(
                 f"Entry Confirmed!\nYour entry for the giveaway of **{self.prize}** is confirmed!\n\nPlease help me by voting 🐸", 
@@ -158,10 +206,16 @@ class GiveawayActiveView(discord.ui.View):
 
     @discord.ui.button(label="Participants", style=discord.ButtonStyle.secondary, emoji="👥", custom_id="view_participants")
     async def participants_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows = await db_controller.fetchall(
+            "SELECT user_id FROM giveaway_participants WHERE message_id = ?",
+            (self.message_id,)
+        )
         desc = f"These are the members that have participated in the giveaway of **{self.prize}**:\n\n"
-        for idx, user in enumerate(self.participants, 1):
-            desc += f"{idx}. {user.mention} (1 entry)\n"
-        desc += f"\nTotal Participants: {len(self.participants)}"
+        for idx, row in enumerate(rows[:25], 1):
+            desc += f"{idx}. <@{row[0]}> (1 entry)\n"
+        if len(rows) > 25:
+            desc += f"\n...and {len(rows) - 25} more participants."
+        desc += f"\nTotal Participants: {len(rows)}"
         
         embed = make_embed("Giveaway Participants", desc, COLOR_INFO)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -202,11 +256,12 @@ class GiveawaySetupView(discord.ui.View):
         embed_color = int(self.end_color_hex.lstrip('#'), 16) if self.end_color_hex else COLOR_SUCCESS
         embed = make_embed("🎉 GIVEAWAY ACTIVE 🎉", desc, embed_color)
         
-        view = GiveawayActiveView(self.prize, self.winners, ends_at, self.host)
-        
         try:
-            msg = await self.channel.send(embed=embed, view=view)
+            msg = await self.channel.send(embed=embed)
+            view = GiveawayActiveView(msg.id, self.prize, self.winners, ends_at, self.host)
             view.message = msg
+            await msg.edit(view=view)
+            interaction.client.add_view(view, message_id=msg.id)
             
             await db_controller.execute(
                 """INSERT INTO giveaway_system 
@@ -295,22 +350,27 @@ class ExtendedBotClient(commands.Bot):
                 
                 try:
                     msg = await channel.fetch_message(msg_id)
-                    users_list = []
-                    
-                    if msg.view and hasattr(msg.view, "participants"):
-                        users_list = msg.view.participants
-                    else:
-                        for reaction in msg.reactions:
-                            if str(reaction.emoji) == "🎉":
-                                async for user in reaction.users():
-                                    if not user.bot:
-                                        users_list.append(user)
-                                break
-                    
+                    part_rows = await db_controller.fetchall(
+                        "SELECT user_id FROM giveaway_participants WHERE message_id = ?",
+                        (msg_id,)
+                    )
+                    users_list = [guild.get_member(r[0]) or await guild.fetch_member(r[0]) for r in part_rows if guild.get_member(r[0]) or True]
+                    # Filter out None/failed fetches if necessary
+                    valid_users = []
+                    for uid_tuple in part_rows:
+                        u = guild.get_member(uid_tuple[0])
+                        if not u:
+                            try:
+                                u = await guild.fetch_member(uid_tuple[0])
+                            except discord.HTTPException:
+                                pass
+                        if u:
+                            valid_users.append(u)
+
                     embed_color = int(end_color_hex.lstrip('#'), 16) if end_color_hex else COLOR_SUCCESS
 
-                    if users_list:
-                        selected_winners = random.sample(users_list, min(num_winners, len(users_list)))
+                    if valid_users:
+                        selected_winners = random.sample(valid_users, min(num_winners, len(valid_users)))
                         winners_mention = "\n".join([winner.mention for winner in selected_winners])
                         
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n🏆 Winner(s):\n{winners_mention}\n\nCongratulations! 🎉"
@@ -367,6 +427,12 @@ class ExtendedBotClient(commands.Bot):
     async def setup_hook(self):
         await db_controller.initialize_database()
         
+        active_giveaways = await db_controller.fetchall("SELECT message_id, prize_name, winners, ends_at FROM giveaway_system WHERE is_ended = 0")
+        for row in active_giveaways:
+            msg_id, prize, winners, ends_at = row
+            view = GiveawayActiveView(msg_id, prize, winners, ends_at, None)
+            self.add_view(view, message_id=msg_id)
+
         try:
             await self.load_extension("Sprites")
             print("Sprites cog successfully loaded.")
@@ -789,6 +855,14 @@ class ExtendedBotClient(commands.Bot):
             return
 
         guild_id = message.guild.id
+        await db_controller.execute(
+            """INSERT INTO user_activity (guild_id, user_id, message_count, last_active) 
+               VALUES (?, ?, 1, DATE('now')) 
+               ON CONFLICT(guild_id, user_id) 
+               DO UPDATE SET message_count = message_count + 1, last_active = DATE('now')""",
+            (guild_id, message.author.id)
+        )
+
         if guild_id not in self.automod_cache:
             settings = await db_controller.fetchone("SELECT automod_status FROM server_settings WHERE guild_id = ?", (guild_id,))
             self.automod_cache[guild_id] = bool(settings and settings[0])
@@ -883,16 +957,61 @@ async def handle_health(request):
 
 async def handle_epic_login(request):
     discord_id = request.query.get("discord_id")
-    return web.Response(text=f"Epic OAuth Login Endpoint. Linking for Discord ID: {discord_id}. Configure your Epic OAuth client here.", status=200)
+    if not discord_id:
+        return web.Response(text="Missing discord_id parameter.", status=400)
+    
+    state = f"{discord_id}_{random.randint(100000, 999999)}"
+    oauth_states[state] = float(time.time()) + 600
+
+    if not EPIC_CLIENT_ID:
+        return web.Response(text="Epic OAuth is not configured on this server.", status=500)
+
+    auth_url = (
+        f"https://www.epicgames.com/id/authorize?"
+        f"client_id={EPIC_CLIENT_ID}&redirect_uri={EPIC_REDIRECT_URI}&response_type=code&state={state}"
+    )
+    raise web.HTTPFound(auth_url)
 
 async def handle_epic_callback(request):
-    discord_id = request.query.get("state")
     code = request.query.get("code")
-    if discord_id:
-        await db_controller.execute(
-            "INSERT OR REPLACE INTO epic_accounts (discord_id, epic_account_id, epic_display_name) VALUES (?, ?, ?)",
-            (int(discord_id), "epic_mock_id_123", "FortnitePlayer123")
-        )
+    state = request.query.get("state")
+
+    if not state or state not in oauth_states or time.time() > oauth_states[state]:
+        return web.Response(text="Invalid or expired OAuth state.", status=400)
+
+    discord_id_str = state.split("_")[0]
+    del oauth_states[state]
+
+    if not code:
+        return web.Response(text="Missing authorization code.", status=400)
+
+    token_url = "https://api.epicgames.dev/epic/oauth/v1/token"
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": EPIC_CLIENT_ID,
+        "client_secret": EPIC_CLIENT_SECRET,
+        "redirect_uri": EPIC_REDIRECT_URI
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=payload) as resp:
+            if resp.status != 200:
+                return web.Response(text="Failed to exchange token with Epic Games.", status=500)
+            token_data = await resp.json()
+
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    epic_account_id = token_data.get("account_id", "unknown_epic_id")
+    epic_display_name = token_data.get("displayName", "EpicUser")
+
+    await db_controller.execute(
+        """INSERT OR REPLACE INTO epic_accounts 
+        (discord_id, epic_account_id, epic_display_name, access_token, refresh_token, updated_at) 
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+        (int(discord_id_str), epic_account_id, epic_display_name, access_token, refresh_token)
+    )
+
     return web.Response(text="Epic account successfully linked! You can now close this window and return to Discord.", status=200)
 
 async def handle_epic_unlink(request):
@@ -921,6 +1040,8 @@ async def main():
         start_web_server(client),
         client.start(BOT_TOKEN)
     )
+
+import aiohttp
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
