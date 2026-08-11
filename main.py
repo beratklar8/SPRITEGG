@@ -1,20 +1,20 @@
 import os
 import re
-import json
 import time
-import random
 import asyncio
 import datetime
 import traceback
 import secrets
 from typing import Optional
+from urllib.parse import urlencode
 
-import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from aiohttp import web
+import aiohttp
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet, InvalidToken
 from groq import AsyncGroq
 
 from database import DatabaseController, aiosqlite
@@ -23,11 +23,58 @@ load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+API_SECRET = os.getenv("API_SECRET")
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
 WEB_PORT = int(os.getenv("PORT", 10000))
 GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
 EPIC_CLIENT_ID = os.getenv("EPIC_CLIENT_ID", "")
 EPIC_CLIENT_SECRET = os.getenv("EPIC_CLIENT_SECRET", "")
-EPIC_REDIRECT_URI = os.getenv("EPIC_REDIRECT_URI", "http://localhost:10000/epic/callback")
+EPIC_REDIRECT_URI = os.getenv("EPIC_REDIRECT_URI", "")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+
+missing_secrets = []
+if not BOT_TOKEN:
+    missing_secrets.append("DISCORD_TOKEN")
+if not API_SECRET:
+    missing_secrets.append("API_SECRET")
+if not ENCRYPTION_KEY:
+    missing_secrets.append("ENCRYPTION_KEY")
+if not EPIC_CLIENT_ID:
+    missing_secrets.append("EPIC_CLIENT_ID")
+if not EPIC_CLIENT_SECRET:
+    missing_secrets.append("EPIC_CLIENT_SECRET")
+
+if ENVIRONMENT.lower() == "production":
+    if not EPIC_REDIRECT_URI or not EPIC_REDIRECT_URI.startswith("https://"):
+        missing_secrets.append("EPIC_REDIRECT_URI (Must use a valid HTTPS domain in production)")
+else:
+    if not EPIC_REDIRECT_URI:
+        EPIC_REDIRECT_URI = "http://localhost:10000/epic/callback"
+
+if missing_secrets:
+    raise RuntimeError(f"Critical Error: Missing required or insecure environment variables: {', '.join(missing_secrets)}. Secure production startup halted.")
+
+try:
+    fernet_cipher = Fernet(ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
+except Exception as e:
+    raise RuntimeError(f"Critical Error: Invalid ENCRYPTION_KEY provided for Fernet cipher: {e}")
+
+def encrypt_token(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        return fernet_cipher.encrypt(token.encode()).decode()
+    except Exception:
+        return None
+
+def decrypt_token(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        return fernet_cipher.decrypt(token.encode()).decode()
+    except InvalidToken:
+        return None
 
 db_controller = DatabaseController()
 
@@ -42,8 +89,6 @@ COLOR_DANGER = 0xE74C3C
 COLOR_INFO = 0x3498DB
 COLOR_PURPLE = 0x9B59B6
 
-SPECIAL_USER_ID = 1242143149917212767
-
 groq_api_client = None
 if GROQ_API_SECRET:
     try:
@@ -52,7 +97,8 @@ if GROQ_API_SECRET:
         print(f"Failed to initialize Groq client: {initialization_exception}")
 
 user_cooldowns = {}
-oauth_states = {}
+ai_locks = {}
+giveaway_entry_locks = {}
 
 def validate_hex_color(color_str: str, default: int) -> int:
     if not color_str or not isinstance(color_str, str):
@@ -68,7 +114,9 @@ def validate_hex_color(color_str: str, default: int) -> int:
 def is_owner_or_special(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    return interaction.user.id == SPECIAL_USER_ID or interaction.user == interaction.guild.owner
+    if BOT_OWNER_ID != 0 and interaction.user.id == BOT_OWNER_ID:
+        return True
+    return interaction.user == interaction.guild.owner
 
 def has_permission(interaction: discord.Interaction, permission_name: str) -> bool:
     if is_owner_or_special(interaction):
@@ -82,13 +130,29 @@ def has_permission(interaction: discord.Interaction, permission_name: str) -> bo
 
 async def check_permission_and_respond(interaction: discord.Interaction, permission_name: str) -> bool:
     if not has_permission(interaction, permission_name):
-        embed = error_embed("Access Denied", "Je hebt geen toestemming om dit command te gebruiken.")
+        embed = error_embed("Access Denied", "You do not have permission to use this command.")
         if interaction.response.is_done():
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
         return False
     return True
+
+def can_moderate_member(issuer: discord.Member, target: discord.Member) -> bool:
+    if issuer.guild.owner_id == issuer.id:
+        return True
+    if target.guild.owner_id == target.id:
+        return False
+    return issuer.top_role > target.top_role
+
+def can_bot_moderate(guild: discord.Guild, target: discord.Member, permission_needed: str) -> bool:
+    bot_member = guild.me
+    if not bot_member:
+        return False
+    perms = guild.me.guild_permissions
+    if not getattr(perms, permission_needed, False):
+        return False
+    return bot_member.top_role > target.top_role
 
 def make_embed(title: str, description: str, color: int = COLOR_NEUTRAL) -> discord.Embed:
     embed_instance = discord.Embed(title=title, description=description, color=color)
@@ -107,15 +171,16 @@ def warning_embed(title: str, description: str) -> discord.Embed:
 def info_embed(title: str, description: str) -> discord.Embed:
     return make_embed(f"ℹ {title}", description, COLOR_INFO)
 
-async def send_dm_notification(member: discord.Member, action_title: str, reason: str, guild_name: str, extra_info: Optional[str] = None):
+async def send_dm_notification(member: discord.Member, action_title: str, reason: str, guild_name: str, extra_info: Optional[str] = None) -> bool:
     try:
         desc = f"You have received a **{action_title}** in **{guild_name}**.\n\n**Reason:** {reason}"
         if extra_info:
             desc += f"\n**Details:** {extra_info}"
         embed = make_embed(f"Notification: {action_title}", desc, COLOR_WARNING)
         await member.send(embed=embed)
+        return True
     except (discord.Forbidden, discord.HTTPException):
-        pass
+        return False
 
 # --- INTERACTIVE GIVEAWAY UI VIEWS ---
 
@@ -139,7 +204,7 @@ class GiveawayLeaveView(discord.ui.View):
 
         for child in self.active_view.children:
             if child.custom_id == "enter_giveaway":
-                child.label = str(count) if count > 0 else None
+                child.label = str(count)
         
         if self.active_view.message:
             try:
@@ -147,7 +212,10 @@ class GiveawayLeaveView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
-        await interaction.response.send_message("You have successfully left the giveaway.", ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send("You have successfully left the giveaway.", ephemeral=True)
+        else:
+            await interaction.response.send_message("You have successfully left the giveaway.", ephemeral=True)
         self.stop()
 
 class GiveawayActiveView(discord.ui.View):
@@ -159,21 +227,29 @@ class GiveawayActiveView(discord.ui.View):
         self.end_time = end_time
         self.host = host
         self.message = None
-        self._entry_lock = asyncio.Lock()
 
     @discord.ui.button(style=discord.ButtonStyle.secondary, emoji="🎉", custom_id="enter_giveaway")
     async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.guild:
-            return await interaction.response.send_message("This giveaway can only be entered inside a server.", ephemeral=True)
+            msg_txt = "This giveaway can only be entered inside a server."
+            if interaction.response.is_done():
+                return await interaction.followup.send(msg_txt, ephemeral=True)
+            return await interaction.response.send_message(msg_txt, ephemeral=True)
 
-        async with self._entry_lock:
+        if self.message_id not in giveaway_entry_locks:
+            giveaway_entry_locks[self.message_id] = asyncio.Lock()
+
+        async with giveaway_entry_locks[self.message_id]:
             giveaway_info = await db_controller.fetchone(
                 "SELECT req_daily, req_weekly, req_monthly, req_total, bypass_role_id, is_ended FROM giveaway_system WHERE message_id = ?",
                 (self.message_id,)
             )
 
             if not giveaway_info or giveaway_info[5] == 1:
-                return await interaction.response.send_message("This giveaway has already ended or no longer exists.", ephemeral=True)
+                msg_txt = "This giveaway has already ended or no longer exists."
+                if interaction.response.is_done():
+                    return await interaction.followup.send(msg_txt, ephemeral=True)
+                return await interaction.response.send_message(msg_txt, ephemeral=True)
 
             req_daily, req_weekly, req_monthly, req_total, bypass_role_id, _ = giveaway_info
             bypass = False
@@ -182,24 +258,41 @@ class GiveawayActiveView(discord.ui.View):
                     bypass = True
 
             if not bypass and (req_daily > 0 or req_weekly > 0 or req_monthly > 0 or req_total > 0):
+                now_dt = datetime.datetime.now(datetime.timezone.utc)
+                today_str = now_dt.date().isoformat()
+                week_start_str = (now_dt.date() - datetime.timedelta(days=now_dt.date().weekday())).isoformat()
+                month_start_str = now_dt.date().replace(day=1).isoformat()
+
                 activity = await db_controller.fetchone(
-                    "SELECT message_count, last_active FROM user_activity WHERE guild_id = ? AND user_id = ?",
+                    "SELECT message_count, daily_message_count, week_message_count, month_message_count, last_daily_date, last_weekly_date, last_monthly_date FROM user_activity WHERE guild_id = ? AND user_id = ?",
                     (interaction.guild.id, interaction.user.id)
                 )
+                
                 user_msgs = activity[0] if activity else 0
-                last_active_date = activity[1] if activity else ""
-                today_str = datetime.date.today().isoformat()
+                daily_msgs = activity[1] if activity and activity[4] == today_str else 0
+                weekly_msgs = activity[2] if activity and activity[5] == week_start_str else 0
+                monthly_msgs = activity[3] if activity and activity[6] == month_start_str else 0
 
                 if req_total > 0 and user_msgs < req_total:
-                    return await interaction.response.send_message(
-                        f"You do not meet the total message requirement. Required: **{req_total}**, you have: **{user_msgs}**.",
-                        ephemeral=True
-                    )
-                if req_daily > 0 and (last_active_date != today_str or user_msgs < req_daily):
-                    return await interaction.response.send_message(
-                        f"You do not meet the daily message requirement for today.",
-                        ephemeral=True
-                    )
+                    txt = f"You do not meet the total message requirement. Required: **{req_total}**, you have: **{user_msgs}**."
+                    if interaction.response.is_done():
+                        return await interaction.followup.send(txt, ephemeral=True)
+                    return await interaction.response.send_message(txt, ephemeral=True)
+                if req_daily > 0 and daily_msgs < req_daily:
+                    txt = f"You do not meet the daily message requirement for today. Required: **{req_daily}**, you have: **{daily_msgs}**."
+                    if interaction.response.is_done():
+                        return await interaction.followup.send(txt, ephemeral=True)
+                    return await interaction.response.send_message(txt, ephemeral=True)
+                if req_weekly > 0 and weekly_msgs < req_weekly:
+                    txt = f"You do not meet the weekly message requirement. Required: **{req_weekly}**, you have: **{weekly_msgs}**."
+                    if interaction.response.is_done():
+                        return await interaction.followup.send(txt, ephemeral=True)
+                    return await interaction.response.send_message(txt, ephemeral=True)
+                if req_monthly > 0 and monthly_msgs < req_monthly:
+                    txt = f"You do not meet the monthly message requirement. Required: **{req_monthly}**, you have: **{monthly_msgs}**."
+                    if interaction.response.is_done():
+                        return await interaction.followup.send(txt, ephemeral=True)
+                    return await interaction.response.send_message(txt, ephemeral=True)
 
             existing = await db_controller.fetchone(
                 "SELECT 1 FROM giveaway_participants WHERE message_id = ? AND user_id = ?",
@@ -208,11 +301,10 @@ class GiveawayActiveView(discord.ui.View):
 
             if existing:
                 leave_view = GiveawayLeaveView(self)
-                return await interaction.response.send_message(
-                    "You've already entered this giveaway! If you would like to leave, click the button below.", 
-                    view=leave_view, 
-                    ephemeral=True
-                )
+                txt = "You've already entered this giveaway! If you would like to leave, click the button below."
+                if interaction.response.is_done():
+                    return await interaction.followup.send(txt, view=leave_view, ephemeral=True)
+                return await interaction.response.send_message(txt, view=leave_view, ephemeral=True)
 
             await db_controller.execute(
                 "INSERT OR IGNORE INTO giveaway_participants (message_id, user_id) VALUES (?, ?)",
@@ -223,16 +315,17 @@ class GiveawayActiveView(discord.ui.View):
                 (self.message_id,)
             )
             button.label = str(len(rows))
-            if interaction.message:
+            if self.message:
                 try:
-                    await interaction.message.edit(view=self)
+                    await self.message.edit(view=self)
                 except discord.HTTPException:
                     pass
 
-            await interaction.response.send_message(
-                f"Entry Confirmed!\nYour entry for the giveaway of **{self.prize}** is confirmed!", 
-                ephemeral=True
-            )
+            success_txt = f"Entry Confirmed!\nYour entry for the giveaway of **{self.prize}** is confirmed!"
+            if interaction.response.is_done():
+                await interaction.followup.send(success_txt, ephemeral=True)
+            else:
+                await interaction.response.send_message(success_txt, ephemeral=True)
 
     @discord.ui.button(label="Participants", style=discord.ButtonStyle.secondary, emoji="👥", custom_id="view_participants")
     async def participants_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -248,7 +341,10 @@ class GiveawayActiveView(discord.ui.View):
         desc += f"\nTotal Participants: {len(rows)}"
         
         embed = make_embed("Giveaway Participants", desc, COLOR_INFO)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class GiveawaySetupView(discord.ui.View):
     def __init__(self, prize, winners, duration, host, channel, end_color_hex, req_daily, req_weekly, req_monthly, req_total, bypass_role_id):
@@ -267,10 +363,21 @@ class GiveawaySetupView(discord.ui.View):
 
     @discord.ui.button(label="Edit", style=discord.ButtonStyle.primary, emoji="🛠️")
     async def edit_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Editing is currently not active in this preview.", ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send("Editing is currently not active in this preview.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Editing is currently not active in this preview.", ephemeral=True)
 
     @discord.ui.button(label="Start", style=discord.ButtonStyle.green, emoji="▶️")
     async def start_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        if interaction.message:
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
         ends_at = time.time() + (self.duration * 60)
         timestamp = int(ends_at)
         
@@ -286,10 +393,16 @@ class GiveawaySetupView(discord.ui.View):
         embed_color = validate_hex_color(self.end_color_hex, COLOR_SUCCESS)
         embed = make_embed("🎉 GIVEAWAY ACTIVE 🎉", desc, embed_color)
         
+        msg = None
         try:
             msg = await self.channel.send(embed=embed)
             view = GiveawayActiveView(msg.id, self.prize, self.winners, ends_at, self.host)
             view.message = msg
+            
+            for child in view.children:
+                if child.custom_id == "enter_giveaway":
+                    child.label = "0"
+            
             await msg.edit(view=view)
             interaction.client.add_view(view, message_id=msg.id)
             
@@ -305,15 +418,34 @@ class GiveawaySetupView(discord.ui.View):
                 )
             )
             
-            await interaction.response.edit_message(content="Giveaway started successfully and posted to channel!", embed=None, view=None)
-        except discord.HTTPException:
-            await interaction.response.edit_message(content="Failed to post giveaway due to a Discord API error.", embed=None, view=None)
+            if interaction.response.is_done():
+                await interaction.edit_original_response(content="Giveaway started successfully and posted to channel!", embed=None, view=None)
+            else:
+                await interaction.response.edit_message(content="Giveaway started successfully and posted to channel!", embed=None, view=None)
+        except Exception as e:
+            if msg:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                try:
+                    await db_controller.execute("DELETE FROM giveaway_system WHERE message_id = ?", (msg.id,))
+                except Exception:
+                    pass
+            err_txt = f"Failed to post giveaway due to an error: {e}"
+            if interaction.response.is_done():
+                await interaction.edit_original_response(content=err_txt, embed=None, view=None)
+            else:
+                await interaction.response.edit_message(content=err_txt, embed=None, view=None)
         
         self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red, emoji="✖️")
     async def cancel_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Giveaway cancelled.", embed=None, view=None)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content="Giveaway cancelled.", embed=None, view=None)
+        else:
+            await interaction.response.edit_message(content="Giveaway cancelled.", embed=None, view=None)
         self.stop()
 
 # --- BOT CLIENT CLASS ---
@@ -332,6 +464,7 @@ class ExtendedBotClient(commands.Bot):
         self.invite_link_regex = re.compile(r"(discord\.gg|discord\.com/invite)/[a-zA-Z0-9]+")
         self.automod_cache = {}
         self.sticky_locks = {}
+        self.sticky_cache = {}
 
     async def set_status(self, status: str):
         channel_mapping = {
@@ -359,6 +492,25 @@ class ExtendedBotClient(commands.Bot):
                 except discord.HTTPException as e:
                     print(f"Failed to change visibility of channel {chan_id}: {e}")
 
+    @tasks.loop(minutes=10)
+    async def cleanup_oauth_states_loop(self):
+        try:
+            now = time.time()
+            await db_controller.execute("DELETE FROM oauth_states WHERE expires_at < ?", (now,))
+        except Exception as e:
+            print(f"Error cleaning up expired oauth states: {e}")
+
+    @tasks.loop(hours=6)
+    async def cleanup_memory_caches_loop(self):
+        try:
+            now = time.time()
+            stale_keys = [k for k, last_used in user_cooldowns.items() if now - last_used > 86400]
+            for k in stale_keys:
+                user_cooldowns.pop(k, None)
+                ai_locks.pop(k, None)
+        except Exception as e:
+            print(f"Error cleaning up memory caches: {e}")
+
     @tasks.loop(minutes=1)
     async def background_giveaway_loop(self):
         try:
@@ -369,17 +521,27 @@ class ExtendedBotClient(commands.Bot):
             )
             for row in rows:
                 msg_id, chan_id, guild_id, prize, num_winners, end_color_hex = row
+                
+                check_status = await db_controller.fetchone(
+                    "SELECT is_ended FROM giveaway_system WHERE message_id = ?",
+                    (msg_id,)
+                )
+                if not check_status or check_status[0] == 1:
+                    continue
+
+                await db_controller.execute(
+                    "UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?",
+                    (msg_id,)
+                )
+
                 guild = self.get_guild(guild_id)
                 if not guild:
-                    await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
                     continue
                 channel = guild.get_channel(chan_id)
-                if not channel:
-                    await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
+                if not channel or not isinstance(channel, discord.TextChannel):
                     continue
                 
                 try:
-                    msg = await channel.fetch_message(msg_id)
                     part_rows = await db_controller.fetchall(
                         "SELECT user_id FROM giveaway_participants WHERE message_id = ?",
                         (msg_id,)
@@ -400,7 +562,8 @@ class ExtendedBotClient(commands.Bot):
                     embed_color = validate_hex_color(end_color_hex, COLOR_SUCCESS)
 
                     if valid_users:
-                        selected_winners = random.sample(valid_users, min(num_winners, len(valid_users)))
+                        sys_random = secrets.SystemRandom()
+                        selected_winners = sys_random.sample(valid_users, min(num_winners, len(valid_users)))
                         winners_mention = "\n".join([winner.mention for winner in selected_winners])
                         
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n🏆 Winner(s):\n{winners_mention}\n\nCongratulations! 🎉"
@@ -409,16 +572,16 @@ class ExtendedBotClient(commands.Bot):
                         ended_desc = f"🎉 Giveaway Ended!\n\n🎁 Prize: **{prize}**\n\n❌ No valid participants were found."
                         await channel.send(embed=make_embed("Giveaway Ended", ended_desc, COLOR_WARNING))
                     
-                    if msg:
-                        try:
-                            disabled_view = discord.ui.View()
-                            for child in msg.components:
-                                pass # Clear or disable appropriately if needed
+                    try:
+                        msg = await channel.fetch_message(msg_id)
+                        if msg:
                             await msg.edit(view=None)
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
 
-                    await db_controller.execute("UPDATE giveaway_system SET is_ended = 1 WHERE message_id = ?", (msg_id,))
+                    await db_controller.execute("DELETE FROM giveaway_participants WHERE message_id = ?", (msg_id,))
+                    giveaway_entry_locks.pop(msg_id, None)
+
                 except (discord.NotFound, discord.HTTPException) as api_err:
                     print(f"Temporary API error while processing giveaway {msg_id}: {api_err}")
                 except Exception as loop_err:
@@ -464,6 +627,16 @@ class ExtendedBotClient(commands.Bot):
         for row in active_giveaways:
             msg_id, prize, winners, ends_at = row
             view = GiveawayActiveView(msg_id, prize, winners, ends_at, None)
+            
+            part_count_res = await db_controller.fetchone(
+                "SELECT COUNT(*) FROM giveaway_participants WHERE message_id = ?",
+                (msg_id,)
+            )
+            count = part_count_res[0] if part_count_res else 0
+            for child in view.children:
+                if child.custom_id == "enter_giveaway":
+                    child.label = str(count)
+
             self.add_view(view, message_id=msg_id)
 
         try:
@@ -476,15 +649,23 @@ class ExtendedBotClient(commands.Bot):
 
         self.background_giveaway_loop.start()
         self.background_tempban_loop.start()
+        self.cleanup_oauth_states_loop.start()
+        self.cleanup_memory_caches_loop.start()
 
         vouch_group = app_commands.Group(name="vouch", description="Manage and view trade vouches.")
 
         @vouch_group.command(name="give", description="Vouch for someone you traded with.")
         async def vouch_give(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "No reason provided"):
             if user.id == interaction.user.id:
-                return await interaction.response.send_message(embed=error_embed("Vouch Error", "You cannot vouch for yourself."), ephemeral=True)
+                embed = error_embed("Vouch Error", "You cannot vouch for yourself.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed, ephemeral=True)
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
             if user.bot:
-                return await interaction.response.send_message(embed=error_embed("Vouch Error", "You cannot vouch for a bot."), ephemeral=True)
+                embed = error_embed("Vouch Error", "You cannot vouch for a bot.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed, ephemeral=True)
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
 
             try:
                 await db_controller.execute(
@@ -492,7 +673,10 @@ class ExtendedBotClient(commands.Bot):
                     (interaction.guild.id, user.id, interaction.user.id, reason)
                 )
             except aiosqlite.IntegrityError:
-                return await interaction.response.send_message(embed=error_embed("Already Vouched", f"You have already vouched for {user.mention} in this server."), ephemeral=True)
+                embed = error_embed("Already Vouched", f"You have already vouched for {user.mention} in this server.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed, ephemeral=True)
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
 
             res = await db_controller.fetchone(
                 "SELECT COUNT(*) FROM user_vouches WHERE guild_id = ? AND target_id = ?",
@@ -505,7 +689,10 @@ class ExtendedBotClient(commands.Bot):
                 f"⭐ {interaction.user.mention} submitted a vouch for {user.mention}! Total vouches: **{total_vouches}**",
                 COLOR_SUCCESS
             )
-            await interaction.response.send_message(embed=embed)
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed)
+            else:
+                await interaction.response.send_message(embed=embed)
 
         @vouch_group.command(name="leaderboard", description="View the top vouched users in the server.")
         async def vouch_leaderboard(interaction: discord.Interaction):
@@ -514,7 +701,10 @@ class ExtendedBotClient(commands.Bot):
                 (interaction.guild.id,)
             )
             if not rows:
-                return await interaction.response.send_message(embed=info_embed("Vouch Leaderboard", "No vouches have been recorded in this server yet."), ephemeral=True)
+                embed = info_embed("Vouch Leaderboard", "No vouches have been recorded in this server yet.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed, ephemeral=True)
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
 
             medals = ["👑", "🥈", "🥉"]
             desc = ""
@@ -523,7 +713,10 @@ class ExtendedBotClient(commands.Bot):
                 desc += f"{prefix} <@{target_id}> — **{count}** vouches\n"
 
             embed = make_embed("🏆 Vouch Leaderboard", desc, COLOR_PURPLE)
-            await interaction.response.send_message(embed=embed)
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed)
+            else:
+                await interaction.response.send_message(embed=embed)
 
         self.tree.add_command(vouch_group)
 
@@ -532,8 +725,8 @@ class ExtendedBotClient(commands.Bot):
         @giveaway_group.command(name="create", description="Create a new giveaway with setup panel.")
         @app_commands.default_permissions(manage_guild=True)
         @app_commands.describe(
-            duration="Giveaway duration in minutes",
-            winners="Number of winners",
+            duration="Giveaway duration in minutes (minimum 1)",
+            winners="Number of winners (1-50)",
             prize="Prize name/text",
             channel="Discord text channel where the giveaway should be posted",
             host="Optional user hosting the giveaway",
@@ -547,7 +740,7 @@ class ExtendedBotClient(commands.Bot):
         )
         async def giveaway_create(
             interaction: discord.Interaction, 
-            duration: float, 
+            duration: int, 
             winners: int, 
             prize: str, 
             channel: discord.TextChannel, 
@@ -563,10 +756,22 @@ class ExtendedBotClient(commands.Bot):
             if not await check_permission_and_respond(interaction, "manage_guild"):
                 return
             
-            if duration <= 0:
-                return await interaction.response.send_message(embed=error_embed("Error", "Duration must be greater than 0."), ephemeral=True)
-            if winners < 1:
-                return await interaction.response.send_message(embed=error_embed("Error", "Winners must be at least 1."), ephemeral=True)
+            if duration < 1:
+                embed = error_embed("Error", "Duration must be at least 1 minute.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if winners < 1 or winners > 50:
+                embed = error_embed("Error", "Winners must be between 1 and 50.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+            requirements = [
+                required_daily_messages,
+                required_weekly_messages,
+                required_monthly_messages,
+                required_total_messages
+            ]
+            if any(req < 0 for req in requirements):
+                embed = error_embed("Error", "Message requirements cannot be negative.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
 
             if host is None:
                 host = interaction.user
@@ -574,7 +779,8 @@ class ExtendedBotClient(commands.Bot):
             bot_member = interaction.guild.me
             perms = channel.permissions_for(bot_member)
             if not (perms.send_messages and perms.embed_links):
-                return await interaction.response.send_message(embed=error_embed("Error", "I do not have permission to send messages and embed links in that channel."), ephemeral=True)
+                embed = error_embed("Error", "I do not have permission to send messages and embed links in that channel.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
 
             setup_desc = (
                 f"Click 🎉 button to enter!\n\n"
@@ -621,12 +827,27 @@ class ExtendedBotClient(commands.Bot):
         async def ban_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
             if not await check_permission_and_respond(interaction, "ban_members"):
                 return
+            if not can_moderate_member(interaction.user, member):
+                embed = error_embed("Error", "You cannot moderate this user due to role hierarchy.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not can_bot_moderate(interaction.guild, member, "ban_members"):
+                embed = error_embed("Error", "I cannot moderate this user because they have a higher or equal role to me, or I lack permissions.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
             try:
-                await send_dm_notification(member, "Ban", reason, interaction.guild.name)
+                dm_sent = await send_dm_notification(member, "Ban", reason, interaction.guild.name)
                 await member.ban(reason=reason)
-                await interaction.response.send_message(embed=success_embed("Member Banned", f"Successfully banned {member.mention}.\nReason: {reason}"))
+                msg = f"Successfully banned {member.mention}.\nReason: {reason}"
+                if not dm_sent:
+                    msg += "\n*(Note: Could not send DM notification to user)*"
+                embed = success_embed("Member Banned", msg)
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to ban member due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to ban member due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="unban", description="Unban a user by their user ID.")
         @app_commands.default_permissions(ban_members=True)
@@ -637,11 +858,17 @@ class ExtendedBotClient(commands.Bot):
                 uid = int(user_id)
                 user_obj = discord.Object(id=uid)
                 await interaction.guild.unban(user_obj, reason=reason)
-                await interaction.response.send_message(embed=success_embed("User Unbanned", f"Successfully unbanned user ID `{user_id}`."))
+                embed = success_embed("User Unbanned", f"Successfully unbanned user ID `{user_id}`.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except ValueError:
-                await interaction.response.send_message(embed=error_embed("Error", "Ongeldige user ID opgegeven."), ephemeral=True)
+                embed = error_embed("Error", "Invalid user ID provided.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to unban user due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to unban user due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="tempban", description="Temporary ban a member from the server.")
         @app_commands.default_permissions(ban_members=True)
@@ -649,27 +876,52 @@ class ExtendedBotClient(commands.Bot):
             if not await check_permission_and_respond(interaction, "ban_members"):
                 return
             if duration_hours <= 0:
-                return await interaction.response.send_message(embed=error_embed("Error", "Duur moet groter zijn dan 0 uur."), ephemeral=True)
+                embed = error_embed("Error", "Duration must be greater than 0 hours.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not can_moderate_member(interaction.user, member):
+                embed = error_embed("Error", "You cannot moderate this user due to role hierarchy.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not can_bot_moderate(interaction.guild, member, "ban_members"):
+                embed = error_embed("Error", "I cannot moderate this user because they have a higher or equal role to me, or I lack permissions.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
             expiry = time.time() + (duration_hours * 3600)
             try:
                 await send_dm_notification(member, "Temporary Ban", reason, interaction.guild.name, f"Duration: {duration_hours} hours")
                 await member.ban(reason=reason)
                 await db_controller.execute("INSERT OR REPLACE INTO temporary_bans (guild_id, target_id, expiry_timestamp) VALUES (?, ?, ?)", (interaction.guild.id, member.id, expiry))
-                await interaction.response.send_message(embed=success_embed("Temporary Ban Applied", f"Successfully banned {member.mention} for {duration_hours} hours."))
+                embed = success_embed("Temporary Ban Applied", f"Successfully banned {member.mention} for {duration_hours} hours.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to temp-ban member due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to temp-ban member due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="kick", description="Kick a member from the server.")
         @app_commands.default_permissions(kick_members=True)
         async def kick_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
             if not await check_permission_and_respond(interaction, "kick_members"):
                 return
+            if not can_moderate_member(interaction.user, member):
+                embed = error_embed("Error", "You cannot moderate this user due to role hierarchy.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not can_bot_moderate(interaction.guild, member, "kick_members"):
+                embed = error_embed("Error", "I cannot moderate this user because they have a higher or equal role to me, or I lack permissions.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
             try:
                 await send_dm_notification(member, "Kick", reason, interaction.guild.name)
                 await member.kick(reason=reason)
-                await interaction.response.send_message(embed=success_embed("Member Kicked", f"Successfully kicked {member.mention}."))
+                embed = success_embed("Member Kicked", f"Successfully kicked {member.mention}.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to kick member due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to kick member due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="timeout", description="Timeout a member for a specified duration in minutes (max 40320 min / 28 days).")
         @app_commands.default_permissions(moderate_members=True)
@@ -677,33 +929,62 @@ class ExtendedBotClient(commands.Bot):
             if not await check_permission_and_respond(interaction, "moderate_members"):
                 return
             if minutes <= 0 or minutes > 40320:
-                return await interaction.response.send_message(embed=error_embed("Error", "Aantal minuten moet tussen 1 en 40320 (28 dagen) liggen."), ephemeral=True)
+                embed = error_embed("Error", "Minutes must be between 1 and 40320 (28 days).")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not can_moderate_member(interaction.user, member):
+                embed = error_embed("Error", "You cannot moderate this user due to role hierarchy.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not can_bot_moderate(interaction.guild, member, "moderate_members"):
+                embed = error_embed("Error", "I cannot moderate this user because they have a higher or equal role to me, or I lack permissions.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
             try:
                 await send_dm_notification(member, "Timeout", reason, interaction.guild.name, f"Duration: {minutes} minutes")
                 until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
                 await member.timeout(until, reason=reason)
-                await interaction.response.send_message(embed=success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes."))
+                embed = success_embed("Timeout Applied", f"Successfully timed out {member.mention} for {minutes} minutes.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to timeout member due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to timeout member due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="untimeout", description="Remove timeout from a member.")
         @app_commands.default_permissions(moderate_members=True)
         async def untimeout_slash(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = "No reason provided"):
             if not await check_permission_and_respond(interaction, "moderate_members"):
                 return
+            if not can_moderate_member(interaction.user, member):
+                embed = error_embed("Error", "You cannot moderate this user due to role hierarchy.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if not can_bot_moderate(interaction.guild, member, "moderate_members"):
+                embed = error_embed("Error", "I cannot moderate this user because they have a higher or equal role to me, or I lack permissions.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
             try:
                 await member.timeout(None, reason=reason)
-                await interaction.response.send_message(embed=success_embed("Timeout Removed", f"Successfully removed timeout for {member.mention}."))
+                embed = success_embed("Timeout Removed", f"Successfully removed timeout for {member.mention}.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to remove timeout due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to remove timeout due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        @self.tree.command(name="purge", description="Bulk delete messages in the channel.")
+        @self.tree.command(name="purge", description="Bulk delete messages in the channel (max 100).")
         @app_commands.default_permissions(manage_messages=True)
         async def purge_slash(interaction: discord.Interaction, amount: int):
             if not await check_permission_and_respond(interaction, "manage_messages"):
                 return
-            if amount <= 0:
-                return await interaction.response.send_message(embed=error_embed("Error", "Aantal moet groter zijn dan 0."), ephemeral=True)
+            if not isinstance(interaction.channel, (discord.TextChannel, discord.VoiceChannel, discord.Thread)):
+                embed = error_embed("Error", "This command can only be used in text channels or threads.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+            if amount <= 0 or amount > 100:
+                embed = error_embed("Error", "Amount must be between 1 and 100.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
             await interaction.response.defer(ephemeral=True)
             deleted = await interaction.channel.purge(limit=amount)
             await interaction.followup.send(embed=success_embed("Purge Complete", f"Successfully deleted {len(deleted)} messages."), ephemeral=True)
@@ -713,9 +994,17 @@ class ExtendedBotClient(commands.Bot):
         async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str):
             if not await check_permission_and_respond(interaction, "moderate_members"):
                 return
+            if not can_moderate_member(interaction.user, member):
+                embed = error_embed("Error", "You cannot moderate this user due to role hierarchy.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
             await send_dm_notification(member, "Warning", reason, interaction.guild.name)
             await db_controller.execute("INSERT INTO warning_records (guild_id, target_id, moderator_id, reason) VALUES (?, ?, ?, ?)", (interaction.guild.id, member.id, interaction.user.id, reason))
-            await interaction.response.send_message(embed=success_embed("Warning Issued", f"Warned {member.mention} for: {reason}"))
+            embed = success_embed("Warning Issued", f"Warned {member.mention} for: {reason}")
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed)
+            else:
+                await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="warnings", description="View all warnings for a specific member.")
         @app_commands.default_permissions(moderate_members=True)
@@ -724,27 +1013,35 @@ class ExtendedBotClient(commands.Bot):
                 return
             rows = await db_controller.fetchall("SELECT id, moderator_id, reason, timestamp FROM warning_records WHERE guild_id = ? AND target_id = ?", (interaction.guild.id, member.id))
             if not rows:
-                return await interaction.response.send_message(embed=info_embed("No Warnings", f"{member.mention} has no active warnings recorded."), ephemeral=True)
+                embed = info_embed("No Warnings", f"{member.mention} has no active warnings recorded.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
             
             desc = f"Total warnings for {member.mention}: **{len(rows)}**\n\n"
             for r in rows:
                 w_id, mod_id, reason, ts = r
                 desc += f"**ID:** `{w_id}` | **Mod:** <@{mod_id}> | **Time:** `{ts}`\n**Reason:** {reason}\n\n"
             
-            await interaction.response.send_message(embed=make_embed(f"Warnings for {member.name}", desc, COLOR_WARNING), ephemeral=True)
+            embed = make_embed(f"Warnings for {member.name}", desc, COLOR_WARNING)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds.")
+        @self.tree.command(name="slowmode", description="Set the slowmode delay for the current channel in seconds (max 21600 / 6 hours).")
         @app_commands.default_permissions(manage_channels=True)
         async def slowmode_slash(interaction: discord.Interaction, seconds: int):
             if not await check_permission_and_respond(interaction, "manage_channels"):
                 return
-            if seconds < 0:
-                return await interaction.response.send_message(embed=error_embed("Error", "Slowmode kan niet negatief zijn."), ephemeral=True)
+            if seconds < 0 or seconds > 21600:
+                embed = error_embed("Error", "Slowmode must be between 0 and 21600 seconds (6 hours).")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
             try:
                 await interaction.channel.edit(slowmode_delay=seconds)
-                await interaction.response.send_message(embed=success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds."))
+                embed = success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to update slowmode due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to update slowmode due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="lock", description="Lock the current channel to prevent members from sending messages.")
         @app_commands.default_permissions(manage_channels=True)
@@ -753,9 +1050,14 @@ class ExtendedBotClient(commands.Bot):
                 return
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
-                await interaction.response.send_message(embed=success_embed("Channel Locked", "This channel has been locked."))
+                embed = success_embed("Channel Locked", "This channel has been locked.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to lock channel due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to lock channel due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="unlock", description="Unlock the current channel.")
         @app_commands.default_permissions(manage_channels=True)
@@ -764,25 +1066,40 @@ class ExtendedBotClient(commands.Bot):
                 return
             try:
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
-                await interaction.response.send_message(embed=success_embed("Channel Unlocked", "This channel has been unlocked."))
+                embed = success_embed("Channel Unlocked", "This channel has been unlocked.")
+                if interaction.response.is_done():
+                    return await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to unlock channel due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to unlock channel due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="say", description="Make the bot say something in the channel.")
         @app_commands.default_permissions(manage_messages=True)
         async def say_slash(interaction: discord.Interaction, message: str):
             if not await check_permission_and_respond(interaction, "manage_messages"):
                 return
-            await interaction.response.send_message(embed=success_embed("Message Sent", "Done!"), ephemeral=True)
-            await interaction.channel.send(message)
+            try:
+                await interaction.channel.send(message, allowed_mentions=discord.AllowedMentions.none())
+                embed = success_embed("Message Sent", "Done!")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            except discord.HTTPException:
+                embed = error_embed("Error", "Failed to send message in this channel (missing permissions or invalid context).")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="embed", description="Send a custom text inside an embed.")
         @app_commands.default_permissions(manage_messages=True)
         async def embed_slash(interaction: discord.Interaction, title: str, description: str):
             if not await check_permission_and_respond(interaction, "manage_messages"):
                 return
-            await interaction.response.send_message(embed=success_embed("Embed Sent", "Done!"), ephemeral=True)
-            await interaction.channel.send(embed=make_embed(title, description, COLOR_INFO))
+            try:
+                await interaction.channel.send(embed=make_embed(title, description, COLOR_INFO), allowed_mentions=discord.AllowedMentions.none())
+                embed = success_embed("Embed Sent", "Done!")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            except discord.HTTPException:
+                embed = error_embed("Error", "Failed to send embed in this channel (missing permissions or invalid context).")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="automod", description="Toggle or configure the AutoMod filter status.")
         @app_commands.default_permissions(administrator=True)
@@ -791,7 +1108,11 @@ class ExtendedBotClient(commands.Bot):
                 return
             await db_controller.execute("INSERT OR REPLACE INTO server_settings(guild_id, automod_status) VALUES (?, ?)", (interaction.guild.id, status))
             self.automod_cache[interaction.guild.id] = status
-            await interaction.response.send_message(embed=success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`"))
+            embed = success_embed("AutoMod Updated", f"AutoMod system status is now set to: `{status}`")
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed)
+            else:
+                await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="sticky", description="Create or clear a sticky message in the channel.")
         @app_commands.default_permissions(manage_messages=True)
@@ -800,7 +1121,9 @@ class ExtendedBotClient(commands.Bot):
                 return
             if not text:
                 await db_controller.execute("DELETE FROM sticky_messages WHERE channel_id = ?", (interaction.channel.id,))
-                return await interaction.response.send_message(embed=success_embed("Sticky Removed", "Sticky message cleared for this channel."), ephemeral=True)
+                self.sticky_cache.pop(interaction.channel.id, None)
+                embed = success_embed("Sticky Removed", "Sticky message cleared for this channel.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
             
             existing = await db_controller.fetchone("SELECT message_id FROM sticky_messages WHERE channel_id = ?", (interaction.channel.id,))
             if existing and existing[0]:
@@ -812,23 +1135,38 @@ class ExtendedBotClient(commands.Bot):
 
             msg = await interaction.channel.send(embed=make_embed("Pinned Operational Notice", text))
             await db_controller.execute("INSERT OR REPLACE INTO sticky_messages (channel_id, guild_id, text, message_id) VALUES (?, ?, ?, ?)", (interaction.channel.id, interaction.guild.id, text, msg.id))
-            await interaction.response.send_message(embed=success_embed("Sticky Active", "Sticky message successfully deployed."), ephemeral=True)
+            self.sticky_cache[interaction.channel.id] = (text, msg.id, time.time())
+            embed = success_embed("Sticky Active", "Sticky message successfully deployed.")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(name="reactionrole", description="Bind a reaction emoji to a role on a message.")
         @app_commands.default_permissions(administrator=True)
         async def reactionrole_slash(interaction: discord.Interaction, message_id: str, emoji: str, role: discord.Role):
             if not await check_permission_and_respond(interaction, "administrator"):
                 return
+            
+            bot_member = interaction.guild.me
+            if not bot_member.guild_permissions.manage_roles:
+                embed = error_embed("Error", "I do not have the 'Manage Roles' permission.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+            if role >= bot_member.top_role and not interaction.guild.owner == bot_member:
+                embed = error_embed("Error", "That role is higher than or equal to my highest role. I cannot assign it.")
+                return await interaction.response.send_message(embed=embed, ephemeral=True)
+
             try:
                 m_id = int(message_id)
                 msg = await interaction.channel.fetch_message(m_id)
                 await msg.add_reaction(emoji)
-                await db_controller.execute("INSERT OR REPLACE INTO reaction_role_bindings (message_id, emoji_icon, role_id) VALUES (?, ?, ?)", (m_id, emoji, role.id))
-                await interaction.response.send_message(embed=success_embed("Reaction Role Bound", f"Successfully linked {emoji} to {role.mention} on message `{m_id}`."), ephemeral=True)
+                await db_controller.execute("INSERT OR REPLACE INTO reaction_role_bindings (message_id, emoji_icon, role_id) VALUES (?, ?, ?)", (m_id, str(emoji), role.id))
+                embed = success_embed("Reaction Role Bound", f"Successfully linked {emoji} to {role.mention} on message `{m_id}`.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
             except ValueError:
-                await interaction.response.send_message(embed=error_embed("Error", "Ongeldige message ID opgegeven."), ephemeral=True)
+                embed = error_embed("Error", "Invalid message ID provided.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
             except discord.HTTPException:
-                await interaction.response.send_message(embed=error_embed("Error", "Failed to bind reaction role due to an API error."), ephemeral=True)
+                embed = error_embed("Error", "Failed to bind reaction role due to an API error.")
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
         await self.tree.sync()
         print("Slash commands synced.")
@@ -856,10 +1194,12 @@ class ExtendedBotClient(commands.Bot):
                     except discord.HTTPException:
                         member = None
                 if role and member:
-                    try:
-                        await member.add_roles(role, reason="Reaction Role (Add)")
-                    except discord.HTTPException:
-                        pass
+                    bot_member = guild.me
+                    if bot_member.guild_permissions.manage_roles and role < bot_member.top_role:
+                        try:
+                            await member.add_roles(role, reason="Reaction Role (Add)")
+                        except discord.HTTPException:
+                            pass
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
         if payload.user_id == self.user.id or not payload.guild_id:
@@ -879,22 +1219,40 @@ class ExtendedBotClient(commands.Bot):
                     except discord.HTTPException:
                         member = None
                 if role and member:
-                    try:
-                        await member.remove_roles(role, reason="Reaction Role (Remove)")
-                    except discord.HTTPException:
-                        pass
+                    bot_member = guild.me
+                    if bot_member.guild_permissions.manage_roles and role < bot_member.top_role:
+                        try:
+                            await member.remove_roles(role, reason="Reaction Role (Remove)")
+                        except discord.HTTPException:
+                            pass
 
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
 
         guild_id = message.guild.id
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        today_str = now_dt.date().isoformat()
+        week_start_str = (now_dt.date() - datetime.timedelta(days=now_dt.date().weekday())).isoformat()
+        month_start_str = now_dt.date().replace(day=1).isoformat()
+
+        # Fixed reset logic for periods
         await db_controller.execute(
-            """INSERT INTO user_activity (guild_id, user_id, message_count, last_active) 
-               VALUES (?, ?, 1, DATE('now')) 
+            """INSERT INTO user_activity (guild_id, user_id, message_count, daily_message_count, week_message_count, month_message_count, last_daily_date, last_weekly_date, last_monthly_date) 
+               VALUES (?, ?, 1, 1, 1, 1, ?, ?, ?) 
                ON CONFLICT(guild_id, user_id) 
-               DO UPDATE SET message_count = message_count + 1, last_active = DATE('now')""",
-            (guild_id, message.author.id)
+               DO UPDATE SET 
+                 message_count = message_count + 1,
+                 daily_message_count = CASE WHEN last_daily_date = ? THEN daily_message_count + 1 ELSE 1 END,
+                 week_message_count = CASE WHEN last_weekly_date = ? THEN week_message_count + 1 ELSE 1 END,
+                 month_message_count = CASE WHEN last_monthly_date = ? THEN month_message_count + 1 ELSE 1 END,
+                 last_daily_date = ?,
+                 last_weekly_date = ?,
+                 last_monthly_date = ?""",
+            (
+                guild_id, message.author.id, today_str, week_start_str, month_start_str,
+                today_str, week_start_str, month_start_str, today_str, week_start_str, month_start_str
+            )
         )
 
         if guild_id not in self.automod_cache:
@@ -918,60 +1276,78 @@ class ExtendedBotClient(commands.Bot):
                 return await message.channel.send(embed=warning_embed("Automod Notice", f"{message.author.mention}, please avoid excessive capitalization."), delete_after=5)
 
         if self.user.mentioned_in(message) and not message.mention_everyone:
-            current_time = time.time()
-            last_used = user_cooldowns.get(message.author.id, 0)
-            if current_time - last_used < 5:
-                remaining = int(5 - (current_time - last_used))
-                return await message.reply(f"Please wait {remaining} more seconds before using AI again.", delete_after=5)
+            cooldown_key = (guild_id, message.author.id)
+            if cooldown_key not in ai_locks:
+                ai_locks[cooldown_key] = asyncio.Lock()
             
-            user_cooldowns[message.author.id] = current_time
-            clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
-            
-            if not clean_text:
-                return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your queries today?")
+            async with ai_locks[cooldown_key]:
+                current_time = time.time()
+                last_used = user_cooldowns.get(cooldown_key, 0)
+                if current_time - last_used < 5:
+                    remaining = int(5 - (current_time - last_used))
+                    return await message.reply(f"Please wait {remaining} more seconds before using AI again.", delete_after=5)
+                
+                user_cooldowns[cooldown_key] = current_time
+                clean_text = message.content.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
+                
+                if not clean_text:
+                    return await message.channel.send(f"Hello {message.author.mention}! How can I assist you with your queries today?")
 
-            async with message.channel.typing():
-                if groq_api_client:
-                    try:
-                        chat_completion = await groq_api_client.chat.completions.create(
-                            messages=[{"role": "user", "content": clean_text}],
-                            model="llama-3.3-70b-versatile",
-                        )
-                        reply_text = chat_completion.choices[0].message.content
-                        if not reply_text:
-                            await message.reply("Groq returned an empty response.")
-                        else:
-                            for i in range(0, len(reply_text), 1900):
-                                chunk = reply_text[i:i+1900]
-                                if i == 0:
-                                    await message.reply(chunk)
-                                else:
-                                    await message.channel.send(chunk)
-                    except Exception as err:
-                        traceback.print_exc()
-                        err_msg = str(err)
-                        if "429" in err_msg or "rate_limit" in err_msg.lower():
-                            await message.reply("API rate limit reached. Please try your request again shortly.")
-                        else:
-                            await message.reply("An error occurred while communicating with the AI model.")
-                else:
-                    await message.reply("Groq API key is not configured.")
+                async with message.channel.typing():
+                    if groq_api_client:
+                        try:
+                            chat_completion = await groq_api_client.chat.completions.create(
+                                messages=[
+                                    {"role": "system", "content": "You are a helpful, secure, and concise Discord bot moderation assistant."},
+                                    {"role": "user", "content": clean_text}
+                                ],
+                                model="llama-3.3-70b-versatile",
+                            )
+                            reply_text = chat_completion.choices[0].message.content
+                            if not reply_text:
+                                await message.reply("Groq returned an empty response.")
+                            else:
+                                for i in range(0, len(reply_text), 1900):
+                                    chunk = reply_text[i:i+1900]
+                                    if i == 0:
+                                        await message.reply(chunk)
+                                    else:
+                                        await message.channel.send(chunk)
+                        except Exception as err:
+                            traceback.print_exc()
+                            err_msg = str(err)
+                            if "429" in err_msg or "rate_limit" in err_msg.lower():
+                                await message.reply("API rate limit reached. Please try your request again shortly.")
+                            else:
+                                await message.reply("An error occurred while communicating with the AI model.")
+                    else:
+                        await message.reply("Groq API key is not configured.")
 
         if message.channel.id not in self.sticky_locks:
             self.sticky_locks[message.channel.id] = asyncio.Lock()
 
         async with self.sticky_locks[message.channel.id]:
-            sticky_row = await db_controller.fetchone("SELECT text, message_id FROM sticky_messages WHERE channel_id = ?", (message.channel.id,))
-            if sticky_row:
-                sticky_text, old_msg_id = sticky_row
-                if old_msg_id:
-                    try:
-                        old_msg = await message.channel.fetch_message(old_msg_id)
-                        await old_msg.delete()
-                    except (discord.NotFound, discord.HTTPException):
-                        pass
-                new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_text))
-                await db_controller.execute("UPDATE sticky_messages SET message_id = ? WHERE channel_id = ?", (new_sticky.id, message.channel.id))
+            sticky_data = self.sticky_cache.get(message.channel.id)
+            if not sticky_data:
+                sticky_row = await db_controller.fetchone("SELECT text, message_id FROM sticky_messages WHERE channel_id = ?", (message.channel.id,))
+                if sticky_row:
+                    sticky_text, old_msg_id = sticky_row
+                    sticky_data = (sticky_text, old_msg_id, 0)
+                    self.sticky_cache[message.channel.id] = sticky_data
+
+            if sticky_data:
+                sticky_text, old_msg_id, last_reposted = sticky_data
+                now_ts = time.time()
+                if now_ts - last_reposted > 5:
+                    if old_msg_id:
+                        try:
+                            old_msg = await message.channel.fetch_message(old_msg_id)
+                            await old_msg.delete()
+                        except (discord.NotFound, discord.HTTPException):
+                            pass
+                    new_sticky = await message.channel.send(embed=make_embed("Pinned Operational Notice", sticky_text))
+                    await db_controller.execute("UPDATE sticky_messages SET message_id = ? WHERE channel_id = ?", (new_sticky.id, message.channel.id))
+                    self.sticky_cache[message.channel.id] = (sticky_text, new_sticky.id, now_ts)
 
         await self.process_commands(message)
 
@@ -985,34 +1361,57 @@ async def handle_health(request):
         return web.Response(text="Bot is starting up...", status=503)
 
 async def handle_epic_login(request):
+    auth_header = request.headers.get("Authorization", "")
+    expected_header = f"Bearer {API_SECRET}"
+    if auth_header != expected_header:
+        return web.Response(text="Unauthorized API session token required to initiate link.", status=401)
+
     discord_id = request.query.get("discord_id")
     if not discord_id or not discord_id.isdigit():
         return web.Response(text="Missing or invalid discord_id parameter.", status=400)
     
-    state = f"{discord_id}_{secrets.token_urlsafe(32)}"
-    oauth_states[state] = float(time.time()) + 600
+    state = secrets.token_urlsafe(32)
+    expires_at = time.time() + 600
+    
+    await db_controller.execute(
+        "INSERT INTO oauth_states (state, discord_id, expires_at) VALUES (?, ?, ?)",
+        (state, int(discord_id), expires_at)
+    )
 
     if not EPIC_CLIENT_ID:
         return web.Response(text="Epic OAuth is not configured on this server.", status=500)
 
-    auth_url = (
-        f"https://www.epicgames.com/id/authorize?"
-        f"client_id={EPIC_CLIENT_ID}&redirect_uri={EPIC_REDIRECT_URI}&response_type=code&state={state}"
-    )
+    params = {
+        "client_id": EPIC_CLIENT_ID,
+        "redirect_uri": EPIC_REDIRECT_URI,
+        "response_type": "code",
+        "state": state
+    }
+    auth_url = f"https://www.epicgames.com/id/authorize?{urlencode(params)}"
     raise web.HTTPFound(auth_url)
 
 async def handle_epic_callback(request):
+    error = request.query.get("error")
+    if error:
+        err_desc = request.query.get("error_description", "No description provided.")
+        return web.Response(text=f"Epic OAuth Error: {error} - {err_desc}", status=400)
+
     code = request.query.get("code")
     state = request.query.get("state")
 
-    if not state or state not in oauth_states or time.time() > oauth_states[state]:
+    if not state or not code:
+        return web.Response(text="Missing state or authorization code.", status=400)
+
+    state_row = await db_controller.fetchone(
+        "SELECT discord_id, expires_at FROM oauth_states WHERE state = ?", (state,)
+    )
+    
+    await db_controller.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+    
+    if not state_row or time.time() > state_row[1]:
         return web.Response(text="Invalid or expired OAuth state.", status=400)
 
-    discord_id_str = state.split("_")[0]
-    del oauth_states[state]
-
-    if not code:
-        return web.Response(text="Missing authorization code.", status=400)
+    discord_id = state_row[0]
 
     token_url = "https://api.epicgames.dev/epic/oauth/v1/token"
     payload = {
@@ -1029,23 +1428,34 @@ async def handle_epic_callback(request):
                 return web.Response(text="Failed to exchange token with Epic Games.", status=500)
             token_data = await resp.json()
 
-    access_token = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
+    access_token = encrypt_token(token_data.get("access_token"))
+    refresh_token = encrypt_token(token_data.get("refresh_token"))
     epic_account_id = token_data.get("account_id", "unknown_epic_id")
 
     await db_controller.execute(
-        """INSERT OR REPLACE INTO epic_accounts 
+        """INSERT INTO epic_accounts 
         (discord_id, epic_account_id, access_token, refresh_token, updated_at) 
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-        (int(discord_id_str), epic_account_id, access_token, refresh_token)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(discord_id) DO UPDATE SET 
+            epic_account_id = excluded.epic_account_id,
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token,
+            updated_at = CURRENT_TIMESTAMP""",
+        (discord_id, epic_account_id, access_token, refresh_token)
     )
 
     return web.Response(text="Epic account successfully linked! You can now close this window and return to Discord.", status=200)
 
 async def handle_epic_unlink(request):
+    auth_token = request.headers.get("Authorization")
     discord_id = request.query.get("discord_id")
+    
     if not discord_id or not discord_id.isdigit():
         return web.Response(text="Missing or invalid discord_id parameter.", status=400)
+    
+    expected_header = f"Bearer {API_SECRET}"
+    if not auth_token or auth_token != expected_header:
+        return web.Response(text="Unauthorized unlink request.", status=401)
     
     await db_controller.execute("DELETE FROM epic_accounts WHERE discord_id = ?", (int(discord_id),))
     return web.Response(text="Epic account unlinked successfully.", status=200)
@@ -1056,13 +1466,16 @@ async def start_web_server(client: ExtendedBotClient):
     app.router.add_get("/", handle_health)
     app.router.add_get("/epic/login", handle_epic_login)
     app.router.add_get("/epic/callback", handle_epic_callback)
-    app.router.add_get("/epic/unlink", handle_epic_unlink)
+    app.router.add_delete("/epic/unlink", handle_epic_unlink)
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
-    await site.start()
-    print(f"Web server started on port {WEB_PORT}")
+    try:
+        site = web.TCPSite(runner, "0.0.0.0", WEB_PORT)
+        await site.start()
+        print(f"Web server started on port {WEB_PORT}")
+    except OSError:
+        print(f"Error: Port {WEB_PORT} is already in use. Web server failed to start.")
 
 async def main():
     client = ExtendedBotClient()
