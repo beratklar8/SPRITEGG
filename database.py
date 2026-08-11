@@ -1,12 +1,8 @@
-import os
-import aiosqlite
 import asyncio
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DB_PATH = os.path.join(BASE_DIR, "bot.db")
+import aiosqlite
 
 class DatabaseController:
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
+    def __init__(self, db_path: str):
         self.db_path = db_path
         self._lock = asyncio.Lock()
 
@@ -56,14 +52,6 @@ class DatabaseController:
                     )
                 """)
                 await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS reaction_role_bindings (
-                        message_id INTEGER,
-                        emoji_icon TEXT,
-                        role_id INTEGER,
-                        PRIMARY KEY (message_id, emoji_icon)
-                    )
-                """)
-                await conn.execute("""
                     CREATE TABLE IF NOT EXISTS user_vouches (
                         guild_id INTEGER,
                         target_id INTEGER,
@@ -73,15 +61,6 @@ class DatabaseController:
                         PRIMARY KEY (guild_id, target_id, giver_id)
                     )
                 """)
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS sticky_messages (
-                        channel_id INTEGER PRIMARY KEY,
-                        guild_id INTEGER,
-                        text TEXT,
-                        message_id INTEGER
-                    )
-                """)
-                # --- NIEUWE TABELLEN VOOR SPRITE TRADING ---
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS epic_accounts (
                         discord_id INTEGER PRIMARY KEY,
@@ -109,22 +88,6 @@ class DatabaseController:
                         released BOOLEAN DEFAULT 1
                     )
                 """)
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS trades (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        seller_id INTEGER,
-                        buyer_id INTEGER,
-                        status TEXT DEFAULT 'pending',
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS trade_items (
-                        trade_id INTEGER,
-                        user_id INTEGER,
-                        sprite_id TEXT
-                    )
-                """)
                 await conn.commit()
 
     async def execute(self, query: str, params: tuple = ()):
@@ -145,5 +108,3 @@ class DatabaseController:
             async with aiosqlite.connect(self.db_path) as conn:
                 async with conn.execute(query, params) as cursor:
                     return await cursor.fetchall()
-
-db_controller = DatabaseController()
