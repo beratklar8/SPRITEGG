@@ -26,12 +26,13 @@ class DatabaseController:
 
     async def create_tables(self):
         async with self.lock:
-            # 1. Zorg dat de basistabel minimaal bestaat
+            # 1. Maak de basistabel aan inclusief 'prize' en alle andere vereiste kolommen
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS giveaway_system (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id INTEGER UNIQUE,
                     channel_id INTEGER,
+                    prize TEXT,
                     winner_count INTEGER,
                     ends_at INTEGER,
                     status TEXT DEFAULT 'ACTIVE',
@@ -41,20 +42,20 @@ class DatabaseController:
                 )
             """)
             
-            # 2. Controleer op alle vereiste kolommen en voeg ze toe als ze ontbreken
+            # 2. Extra migratie-check voor bestaande tabellen op productie (bijv. Render)
             cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
             columns = [row[1] for row in await cursor.fetchall()]
             
-            # Controleer op 'prize' (of migreer van 'prize_name' indien aanwezig)
+            # Als 'prize' mist maar 'prize_name' bestaat, hernoem het
             if "prize" not in columns:
                 if "prize_name" in columns:
                     await self.db.execute("ALTER TABLE giveaway_system RENAME COLUMN prize_name TO prize;")
-                    logger.info("Database migratie: kolom 'prize_name' hernoemd naar 'prize'.")
+                    logger.info("Database migratie: kolom 'prize_name' succesvol hernoemd naar 'prize'.")
                 else:
                     await self.db.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
                     logger.info("Database migratie: ontbrekende kolom 'prize' toegevoegd.")
 
-            # Extra veiligheid: check ook andere kolommen voor het geval de tabel heel oud is
+            # Controleer ook op andere optionele kolommen
             optional_columns = {
                 "result_message_id": "INTEGER DEFAULT 0",
                 "processing_started_at": "INTEGER DEFAULT 0",
