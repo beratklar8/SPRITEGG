@@ -26,14 +26,27 @@ class DatabaseController:
 
     async def create_tables(self):
         async with self.lock:
-            # 1. Check of de tabel al bestaat en welke kolommen erin zitten
+            # 1. Controleer of de tabel al bestaat en welke kolommen erin zitten
             cursor = await self.db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='giveaway_system';"
             )
             table_exists = await cursor.fetchone()
 
+            if table_exists:
+                # Controleer de aanwezige kolommen
+                cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
+                columns = [row[1] for row in await cursor.fetchall()]
+                
+                # Als 'prize' (of 'prize_name') NIET bestaat, is de tabel verouderd/incorrect. 
+                # We gooien hem weg en maken hem opnieuw aan voor een gegarandeerd juiste structuur.
+                if "prize" not in columns and "prize_name" not in columns:
+                    logger.warning("Verouderde tabel gedetecteerd zonder 'prize' kolom. Tabel wordt opnieuw aangemaakt...")
+                    await self.db.execute("DROP TABLE giveaway_system;")
+                    await self.db.commit()
+                    table_exists = False
+
+            # 2. Maak de tabel aan als deze niet bestaat (of zojuist is weggegooid)
             if not table_exists:
-                # Als de tabel nog helemaal niet bestaat, maak hem direct correct aan
                 await self.db.execute("""
                     CREATE TABLE giveaway_system (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,69 +62,16 @@ class DatabaseController:
                     )
                 """)
                 await self.db.commit()
-                logger.info("Nieuwe giveaway_system tabel aangemaakt.")
-                return
-
-            # 2. Als de tabel wel bestaat, check de kolommen
-            cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
-            columns = [row[1] for row in await cursor.fetchall()]
-
-            # 3. Als 'prize' (of 'prize_name') mist, herbouwen we de tabel veilig via een migratie-transactie
-            if "prize" not in columns and "prize_name" not in columns:
-                logger.warning("Tabel mist 'prize' volledig. Bezig met veilige tabel-rebuild...")
-                
-                # Hernoem oude tabel tijdelijk
-                await self.db.execute("ALTER TABLE giveaway_system RENAME TO giveaway_system_old;")
-                
-                # Maak de nieuwe correcte tabel aan
-                await self.db.execute("""
-                    CREATE TABLE giveaway_system (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        message_id INTEGER UNIQUE,
-                        channel_id INTEGER,
-                        prize TEXT,
-                        winner_count INTEGER,
-                        ends_at INTEGER,
-                        status TEXT DEFAULT 'ACTIVE',
-                        processing_started_at INTEGER DEFAULT 0,
-                        processing_owner TEXT DEFAULT NULL,
-                        result_message_id INTEGER DEFAULT 0
-                    )
-                """)
-                
-                # Probeer data over te zetten (zonder prize, die vullen we met een standaardtekst)
-                try:
-                    await self.db.execute("""
-                        INSERT INTO giveaway_system (id, message_id, channel_id, prize, winner_count, ends_at, status, processing_started_at, processing_owner, result_message_id)
-                        SELECT id, message_id, channel_id, 'Onbekende prijs', winner_count, ends_at, status, 
-                               COALESCE(processing_started_at, 0), processing_owner, COALESCE(result_message_id, 0)
-                        FROM giveaway_system_old;
-                    """)
-                except Exception as e:
-                    logger.error(f"Kon oude data niet volledig migreren: {e}")
-
-                # Ruim de oude tabel op
-                await self.db.execute("DROP TABLE giveaway_system_old;")
-                await self.db.commit()
-                logger.info("Tabel succesvol gerebould met de 'prize' kolom!")
+                logger.info("Geheel nieuwe 'giveaway_system' tabel succesvol aangemaakt met 'prize' kolom.")
             else:
-                # Als 'prize_name' er wel is maar 'prize' niet, simpelweg toevoegen
+                # Als de tabel wel bestond maar 'prize_name' gebruikte in plaats van 'prize'
+                cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
+                columns = [row[1] for row in await cursor.fetchall()]
                 if "prize" not in columns and "prize_name" in columns:
                     await self.db.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
                     await self.db.execute("UPDATE giveaway_system SET prize = prize_name WHERE prize IS NULL;")
                     await self.db.commit()
                     logger.info("Kolom 'prize_name' succesvol gemigreerd naar 'prize'.")
-
-                # Controleer overige optionele kolommen
-                optional_cols = {
-                    "result_message_id": "INTEGER DEFAULT 0",
-                    "processing_started_at": "INTEGER DEFAULT 0",
-                    "processing_owner": "TEXT DEFAULT NULL"
-                }
-                for col_name, col_def in optional_cols.items():
-                    if col_name not in columns:
-                        await self.db.execute(f"ALTER TABLE giveaway_system ADD COLUMN {col_name} {col_def};")
-                        await self.db.commit()
 
     # --- GENERIEKE HELPER METHODES ---
 
@@ -140,7 +100,7 @@ class DatabaseController:
         """
         Claimt een actieve giveaway waarvan de eindtijd (ends_at) is verstreken,
         óf waarvan de verwerkingslease is verlopen (>900 sec).
-      """
+        """
         async with self.lock:
             query = """
                 UPDATE giveaway_system
