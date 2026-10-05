@@ -16,8 +16,8 @@ class DatabaseController:
         await self.db.execute("PRAGMA journal_mode=WAL;")
         await self.create_tables()
 
-    # Alias zodat `.initialize_database()` in main.py ook direct werkt
     async def initialize_database(self):
+        """Alias voor connect() zodat bestaande aanroepen in main.py direct werken."""
         await self.connect()
 
     async def close(self):
@@ -26,6 +26,7 @@ class DatabaseController:
 
     async def create_tables(self):
         async with self.lock:
+            # 1. Zorg dat de basistabel bestaat
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS giveaway_system (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,9 +41,22 @@ class DatabaseController:
                     result_message_id INTEGER DEFAULT 0
                 )
             """)
+            
+            # 2. Automatische migratie: controleer op oude kolomnamen zoals 'prize_name'
+            cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
+            columns = [row[1] for row in await cursor.fetchall()]
+            
+            if "prize" not in columns:
+                if "prize_name" in columns:
+                    await self.db.execute("ALTER TABLE giveaway_system RENAME COLUMN prize_name TO prize;")
+                    logger.info("Database migratie: kolom 'prize_name' succesvol hernoemd naar 'prize'.")
+                else:
+                    await self.db.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
+                    logger.info("Database migratie: kolom 'prize' toegevoegd aan giveaway_system.")
+
             await self.db.commit()
 
-    # --- GENERIEKE HELPER METHODES (Zodat fetchall / execute direct werken) ---
+    # --- GENERIEKE HELPER METHODES ---
 
     async def execute(self, query: str, parameters: tuple = ()):
         """Voert een losse query uit (INSERT, UPDATE, DELETE) en commit direct."""
