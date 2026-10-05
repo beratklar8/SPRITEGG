@@ -1,197 +1,113 @@
 import aiosqlite
-import asyncio
-import time
-import logging
-
-logger = logging.getLogger("giveaway_bot")
+import os
 
 class DatabaseController:
-    def __init__(self, db_path: str = "bot_database.db"):
+    def __init__(self, db_path="bot_database.db"):
         self.db_path = db_path
-        self.db: aiosqlite.Connection = None
-        self.lock = asyncio.Lock()
-
-    async def connect(self):
-        self.db = await aiosqlite.connect(self.db_path)
-        await self.db.execute("PRAGMA journal_mode=WAL;")
-        await self.create_tables()
+        self.connection = None
 
     async def initialize_database(self):
-        """Alias voor connect() zodat bestaande aanroepen in main.py direct werken."""
-        await self.connect()
+        """Initializes the SQLite database connection and creates required tables."""
+        self.connection = await aiosqlite.connect(self.db_path)
+        await self.connection.execute("PRAGMA journal_mode=WAL;")
+        
+        # Giveaway System Table
+        await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS giveaway_system (
+                message_id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                guild_id INTEGER,
+                prize TEXT,
+                ends_at REAL,
+                winners INTEGER,
+                status TEXT,
+                processing_started_at REAL,
+                result_message_id INTEGER,
+                req_daily INTEGER,
+                req_weekly INTEGER,
+                req_monthly INTEGER,
+                req_total INTEGER,
+                bypass_role_id INTEGER,
+                end_color TEXT
+            )
+        """)
+
+        # Giveaway Participants Table
+        await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS giveaway_participants (
+                message_id INTEGER,
+                user_id INTEGER,
+                PRIMARY KEY (message_id, user_id)
+            )
+        """)
+
+        # User Activity Table
+        await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS user_activity (
+                guild_id INTEGER,
+                user_id INTEGER,
+                message_count INTEGER DEFAULT 0,
+                daily_message_count INTEGER DEFAULT 0,
+                week_message_count INTEGER DEFAULT 0,
+                month_message_count INTEGER DEFAULT 0,
+                last_daily_date TEXT,
+                last_weekly_date TEXT,
+                last_monthly_date TEXT,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+
+        # User Vouches Table
+        await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS user_vouches (
+                guild_id INTEGER,
+                target_id INTEGER,
+                giver_id INTEGER,
+                reason TEXT,
+                PRIMARY KEY (guild_id, target_id, giver_id)
+            )
+        """)
+
+        # Temporary Bans Table
+        await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS temporary_bans (
+                guild_id INTEGER,
+                target_id INTEGER,
+                expiry_timestamp REAL,
+                PRIMARY KEY (guild_id, target_id)
+            )
+        """)
+
+        # Safety Migration: Check if older tables are missing new columns and add them automatically
+        async with self.connection.execute("PRAGMA table_info(giveaway_system);") as cursor:
+            columns = [row[1] for row in await cursor.fetchall()]
+        
+        if "winners" not in columns:
+            await self.connection.execute("ALTER TABLE giveaway_system ADD COLUMN winners INTEGER DEFAULT 1;")
+        if "prize" not in columns:
+            await self.connection.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
+        if "end_color" not in columns:
+            await self.connection.execute("ALTER TABLE giveaway_system ADD COLUMN end_color TEXT;")
+
+        await self.connection.commit()
+
+    async def execute(self, query, params=()):
+        """Executes a write query (INSERT, UPDATE, DELETE) and commits changes."""
+        async with self.connection.execute(query, params) as cursor:
+            await self.connection.commit()
+            return cursor.rowcount
+
+    async def fetchone(self, query, params=()):
+        """Fetches a single row from the database."""
+        async with self.connection.execute(query, params) as cursor:
+            return await cursor.fetchone()
+
+    async def fetchall(self, query, params=()):
+        """Fetches multiple rows from the database."""
+        async with self.connection.execute(query, params) as cursor:
+            return await cursor.fetchall()
 
     async def close(self):
-        if self.db:
-            await self.db.close()
-
-    async def create_tables(self):
-        async with self.lock:
-            # 1. Controleer of de tabel al bestaat en welke kolommen erin zitten
-            cursor = await self.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='giveaway_system';"
-            )
-            table_exists = await cursor.fetchone()
-
-            if table_exists:
-                # Controleer de aanwezige kolommen
-                cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
-                columns = [row[1] for row in await cursor.fetchall()]
-                
-                # Als 'prize' (of 'prize_name') NIET bestaat, is de tabel verouderd/incorrect. 
-                # We gooien hem weg en maken hem opnieuw aan voor een gegarandeerd juiste structuur.
-                if "prize" not in columns and "prize_name" not in columns:
-                    logger.warning("Verouderde tabel gedetecteerd zonder 'prize' kolom. Tabel wordt opnieuw aangemaakt...")
-                    await self.db.execute("DROP TABLE giveaway_system;")
-                    await self.db.commit()
-                    table_exists = False
-
-            # 2. Maak de tabel aan als deze niet bestaat (of zojuist is weggegooid)
-            if not table_exists:
-                await self.db.execute("""
-                    CREATE TABLE giveaway_system (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        message_id INTEGER UNIQUE,
-                        channel_id INTEGER,
-                        prize TEXT,
-                        winner_count INTEGER,
-                        ends_at INTEGER,
-                        status TEXT DEFAULT 'ACTIVE',
-                        processing_started_at INTEGER DEFAULT 0,
-                        processing_owner TEXT DEFAULT NULL,
-                        result_message_id INTEGER DEFAULT 0
-                    )
-                """)
-                await self.db.commit()
-                logger.info("Geheel nieuwe 'giveaway_system' tabel succesvol aangemaakt met 'prize' kolom.")
-            else:
-                # Als de tabel wel bestond maar 'prize_name' gebruikte in plaats van 'prize'
-                cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
-                columns = [row[1] for row in await cursor.fetchall()]
-                if "prize" not in columns and "prize_name" in columns:
-                    await self.db.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
-                    await self.db.execute("UPDATE giveaway_system SET prize = prize_name WHERE prize IS NULL;")
-                    await self.db.commit()
-                    logger.info("Kolom 'prize_name' succesvol gemigreerd naar 'prize'.")
-
-    # --- GENERIEKE HELPER METHODES ---
-
-    async def execute(self, query: str, parameters: tuple = ()):
-        """Voert een losse query uit (INSERT, UPDATE, DELETE) en commit direct."""
-        async with self.lock:
-            cursor = await self.db.execute(query, parameters)
-            await self.db.commit()
-            return cursor
-
-    async def fetchall(self, query: str, parameters: tuple = ()):
-        """Haalt meerdere rijen op met een SELECT query."""
-        async with self.lock:
-            async with self.db.execute(query, parameters) as cursor:
-                return await cursor.fetchall()
-
-    async def fetchone(self, query: str, parameters: tuple = ()):
-        """Haalt één rij op met een SELECT query."""
-        async with self.lock:
-            async with self.db.execute(query, parameters) as cursor:
-                return await cursor.fetchone()
-
-    # --- SPECIFIEKE GIVEAWAY METHODES ---
-
-    async def claim_giveaway(self, worker_token: str, current_time: int):
-        """
-        Claimt een actieve giveaway waarvan de eindtijd (ends_at) is verstreken,
-        óf waarvan de verwerkingslease is verlopen (>900 sec).
-        """
-        async with self.lock:
-            query = """
-                UPDATE giveaway_system
-                SET status = 'PROCESSING',
-                    processing_owner = ?,
-                    processing_started_at = ?
-                WHERE id = (
-                    SELECT id FROM giveaway_system
-                    WHERE (status = 'ACTIVE' AND ends_at <= ?)
-                       OR (status = 'PROCESSING' AND processing_started_at < ? - 900)
-                    LIMIT 1
-                )
-                RETURNING id, message_id, channel_id, prize, winner_count, result_message_id;
-            """
-            try:
-                cursor = await self.db.execute(query, (worker_token, current_time, current_time, current_time))
-                row = await cursor.fetchone()
-                await self.db.commit()
-                
-                if row:
-                    return {
-                        "id": row[0],
-                        "message_id": row[1],
-                        "channel_id": row[2],
-                        "prize": row[3],
-                        "winner_count": row[4],
-                        "result_message_id": row[5]
-                    }
-            except Exception as e:
-                logger.error(f"Fout bij claimen giveaway: {e}")
-            return None
-
-    async def refresh_lease(self, giveaway_id: int, worker_token: str, current_time: int):
-        """Verlengt de lease (heartbeat) om time-outs bij zware taken te voorkomen."""
-        async with self.lock:
-            query = """
-                UPDATE giveaway_system
-                SET processing_started_at = ?
-                WHERE id = ? AND processing_owner = ? AND status = 'PROCESSING'
-            """
-            await self.db.execute(query, (current_time, giveaway_id, worker_token))
-            await self.db.commit()
-
-    async def set_result_pending(self, giveaway_id: int, worker_token: str, result_message_id: int):
-        """
-        Slaat de result_message_id alvast op *voordat* de status op COMPLETED gaat.
-        """
-        async with self.lock:
-            query = """
-                UPDATE giveaway_system
-                SET result_message_id = ?
-                WHERE id = ? AND processing_owner = ?
-            """
-            await self.db.execute(query, (result_message_id, giveaway_id, worker_token))
-            await self.db.commit()
-
-    async def finalize_giveaway(self, giveaway_id: int, worker_token: str) -> bool:
-        """Zet de giveaway definitief op COMPLETED."""
-        async with self.lock:
-            query = """
-                UPDATE giveaway_system
-                SET status = 'COMPLETED',
-                    processing_owner = NULL
-                WHERE id = ? AND processing_owner = ?
-            """
-            cursor = await self.db.execute(query, (giveaway_id, worker_token))
-            await self.db.commit()
-            return cursor.rowcount > 0
-
-    async def release_giveaway_lease(self, giveaway_id: int, worker_token: str):
-        """Zet de giveaway terug naar ACTIVE bij een onverwachte fout of tijdelijke storing."""
-        async with self.lock:
-            query = """
-                UPDATE giveaway_system
-                SET status = 'ACTIVE',
-                    processing_owner = NULL,
-                    processing_started_at = 0
-                WHERE id = ? AND processing_owner = ?
-            """
-            await self.db.execute(query, (giveaway_id, worker_token))
-            await self.db.commit()
-
-    async def mark_giveaway_completed_safely(self, giveaway_id: int, worker_token: str, result_message_id: int = 0):
-        """Markeert als COMPLETED als het originele giveaway-bericht op Discord definitief weg is."""
-        async with self.lock:
-            query = """
-                UPDATE giveaway_system
-                SET status = 'COMPLETED',
-                    result_message_id = ?,
-                    processing_owner = NULL
-                WHERE id = ? AND processing_owner = ?
-            """
-            await self.db.execute(query, (result_message_id, giveaway_id, worker_token))
-            await self.db.commit()
+        """Closes the database connection cleanly."""
+        if self.connection:
+            await self.connection.close()
