@@ -6,19 +6,10 @@ load_dotenv()
 
 DB_NAME = "bot_database.db"
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
-EPIC_REDIRECT_URI = os.getenv("EPIC_REDIRECT_URI")
-EPIC_CLIENT_ID = os.getenv("EPIC_CLIENT_ID", "your-epic-client-id")
-EPIC_CLIENT_SECRET = os.getenv("EPIC_CLIENT_SECRET", "your-epic-client-secret")
 API_SECRET = os.getenv("API_SECRET", "super-secret-api-key")
 
-if ENVIRONMENT == "production":
-    if not EPIC_REDIRECT_URI or not EPIC_REDIRECT_URI.startswith("https://"):
-        raise ValueError("CRITICAL: EPIC_REDIRECT_URI must use HTTPS in production.")
-else:
-    EPIC_REDIRECT_URI = EPIC_REDIRECT_URI or "http://localhost:10000/epic/callback"
-
 class DatabaseController:
-    """Controller voor het beheren van de SQLite database en tabellen inclusief helper methodes."""
+    """Controller for managing the SQLite database and tables including helper methods."""
     def __init__(self, db_path: str = DB_NAME):
         self.db_path = db_path
 
@@ -110,22 +101,6 @@ class DatabaseController:
                     emoji_icon TEXT,
                     role_id INTEGER,
                     PRIMARY KEY (message_id, emoji_icon)
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS oauth_states (
-                    state TEXT PRIMARY KEY,
-                    discord_id INTEGER,
-                    expires_at REAL
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS epic_accounts (
-                    discord_id INTEGER PRIMARY KEY,
-                    epic_account_id TEXT,
-                    access_token TEXT,
-                    refresh_token TEXT,
-                    updated_at TIMESTAMP
                 )
             """)
             await db.commit()
