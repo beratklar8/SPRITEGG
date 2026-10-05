@@ -6,15 +6,12 @@ import datetime
 import traceback
 import secrets
 from typing import Optional
-from urllib.parse import urlencode
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from aiohttp import web
-import aiohttp
 from dotenv import load_dotenv
-from cryptography.fernet import Fernet, InvalidToken
 from groq import AsyncGroq
 
 from database import DatabaseController, aiosqlite
@@ -27,10 +24,6 @@ API_SECRET = os.getenv("API_SECRET")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0"))
 WEB_PORT = int(os.getenv("PORT", 10000))
 GROQ_API_SECRET = os.getenv("GROQ_API_KEY")
-EPIC_CLIENT_ID = os.getenv("EPIC_CLIENT_ID", "")
-EPIC_CLIENT_SECRET = os.getenv("EPIC_CLIENT_SECRET", "")
-EPIC_REDIRECT_URI = os.getenv("EPIC_REDIRECT_URI", "")
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
 missing_secrets = []
@@ -38,43 +31,9 @@ if not BOT_TOKEN:
     missing_secrets.append("DISCORD_TOKEN")
 if not API_SECRET:
     missing_secrets.append("API_SECRET")
-if not ENCRYPTION_KEY:
-    missing_secrets.append("ENCRYPTION_KEY")
-if not EPIC_CLIENT_ID:
-    missing_secrets.append("EPIC_CLIENT_ID")
-if not EPIC_CLIENT_SECRET:
-    missing_secrets.append("EPIC_CLIENT_SECRET")
-
-if ENVIRONMENT.lower() == "production":
-    if not EPIC_REDIRECT_URI or not EPIC_REDIRECT_URI.startswith("https://"):
-        missing_secrets.append("EPIC_REDIRECT_URI (Must use a valid HTTPS domain in production)")
-else:
-    if not EPIC_REDIRECT_URI:
-        EPIC_REDIRECT_URI = "http://localhost:10000/epic/callback"
 
 if missing_secrets:
-    raise RuntimeError(f"Critical Error: Missing required or insecure environment variables: {', '.join(missing_secrets)}. Secure production startup halted.")
-
-try:
-    fernet_cipher = Fernet(ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
-except Exception as e:
-    raise RuntimeError(f"Critical Error: Invalid ENCRYPTION_KEY provided for Fernet cipher: {e}")
-
-def encrypt_token(token: Optional[str]) -> Optional[str]:
-    if not token:
-        return None
-    try:
-        return fernet_cipher.encrypt(token.encode()).decode()
-    except Exception:
-        return None
-
-def decrypt_token(token: Optional[str]) -> Optional[str]:
-    if not token:
-        return None
-    try:
-        return fernet_cipher.decrypt(token.encode()).decode()
-    except InvalidToken:
-        return None
+    raise RuntimeError(f"Critical Error: Missing required environment variables: {', '.join(missing_secrets)}. Secure startup halted.")
 
 db_controller = DatabaseController()
 
@@ -492,14 +451,6 @@ class ExtendedBotClient(commands.Bot):
                 except discord.HTTPException as e:
                     print(f"Failed to change visibility of channel {chan_id}: {e}")
 
-    @tasks.loop(minutes=10)
-    async def cleanup_oauth_states_loop(self):
-        try:
-            now = time.time()
-            await db_controller.execute("DELETE FROM oauth_states WHERE expires_at < ?", (now,))
-        except Exception as e:
-            print(f"Error cleaning up expired oauth states: {e}")
-
     @tasks.loop(hours=6)
     async def cleanup_memory_caches_loop(self):
         try:
@@ -638,23 +589,16 @@ class ExtendedBotClient(commands.Bot):
                     child.label = str(count)
 
             self.add_view(view, message_id=msg_id)
-
-        try:
-            await self.load_extension("Sprites")
-            print("Sprites cog successfully loaded.")
-        except Exception as e:
-            print(f"Could not load Sprites cog (skipping): {e}")
         
         await self.set_status('updating')
 
         self.background_giveaway_loop.start()
         self.background_tempban_loop.start()
-        self.cleanup_oauth_states_loop.start()
         self.cleanup_memory_caches_loop.start()
 
-        vouch_group = app_commands.Group(name="vouch", description="Manage and view trade vouches.")
+        vouch_group = app_commands.Group(name="vouch", description="Manage and view vouches.")
 
-        @vouch_group.command(name="give", description="Vouch for someone you traded with.")
+        @vouch_group.command(name="give", description="Vouch for someone.")
         async def vouch_give(interaction: discord.Interaction, user: discord.Member, reason: Optional[str] = "No reason provided"):
             if user.id == interaction.user.id:
                 embed = error_embed("Vouch Error", "You cannot vouch for yourself.")
@@ -786,7 +730,7 @@ class ExtendedBotClient(commands.Bot):
                 f"Click 🎉 button to enter!\n\n"
                 f"🎁 Prize: **{prize}**\n"
                 f"🏆 Winners: **{winners}**\n"
-                f"⏱️ Duration: **{duration}** minute(s)\n"
+                f"⏱️️ Duration: **{duration}** minute(s)\n"
                 f"👤 Host: {host.mention}\n\n"
                 f"*Review settings below and click Start to launch.*"
             )
@@ -1036,7 +980,7 @@ class ExtendedBotClient(commands.Bot):
                 await interaction.channel.edit(slowmode_delay=seconds)
                 embed = success_embed("Slowmode Updated", f"Channel slowmode set to `{seconds}` seconds.")
                 if interaction.response.is_done():
-                    return await interaction.followup.send(embed=embed)
+                    await interaction.followup.send(embed=embed)
                 else:
                     await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
@@ -1052,7 +996,7 @@ class ExtendedBotClient(commands.Bot):
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=False)
                 embed = success_embed("Channel Locked", "This channel has been locked.")
                 if interaction.response.is_done():
-                    return await interaction.followup.send(embed=embed)
+                    await interaction.followup.send(embed=embed)
                 else:
                     await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
@@ -1068,7 +1012,7 @@ class ExtendedBotClient(commands.Bot):
                 await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
                 embed = success_embed("Channel Unlocked", "This channel has been unlocked.")
                 if interaction.response.is_done():
-                    return await interaction.followup.send(embed=embed)
+                    await interaction.followup.send(embed=embed)
                 else:
                     await interaction.response.send_message(embed=embed)
             except discord.HTTPException:
@@ -1236,7 +1180,6 @@ class ExtendedBotClient(commands.Bot):
         week_start_str = (now_dt.date() - datetime.timedelta(days=now_dt.date().weekday())).isoformat()
         month_start_str = now_dt.date().replace(day=1).isoformat()
 
-        # Fixed reset logic for periods
         await db_controller.execute(
             """INSERT INTO user_activity (guild_id, user_id, message_count, daily_message_count, week_message_count, month_message_count, last_daily_date, last_weekly_date, last_monthly_date) 
                VALUES (?, ?, 1, 1, 1, 1, ?, ?, ?) 
@@ -1351,7 +1294,7 @@ class ExtendedBotClient(commands.Bot):
 
         await self.process_commands(message)
 
-# --- AIOHTTP WEB SERVER & SECURED EPIC OAUTH ENDPOINTS ---
+# --- AIOHTTP WEB SERVER ---
 
 async def handle_health(request):
     client: ExtendedBotClient = request.app['bot']
@@ -1360,113 +1303,10 @@ async def handle_health(request):
     else:
         return web.Response(text="Bot is starting up...", status=503)
 
-async def handle_epic_login(request):
-    auth_header = request.headers.get("Authorization", "")
-    expected_header = f"Bearer {API_SECRET}"
-    if auth_header != expected_header:
-        return web.Response(text="Unauthorized API session token required to initiate link.", status=401)
-
-    discord_id = request.query.get("discord_id")
-    if not discord_id or not discord_id.isdigit():
-        return web.Response(text="Missing or invalid discord_id parameter.", status=400)
-    
-    state = secrets.token_urlsafe(32)
-    expires_at = time.time() + 600
-    
-    await db_controller.execute(
-        "INSERT INTO oauth_states (state, discord_id, expires_at) VALUES (?, ?, ?)",
-        (state, int(discord_id), expires_at)
-    )
-
-    if not EPIC_CLIENT_ID:
-        return web.Response(text="Epic OAuth is not configured on this server.", status=500)
-
-    params = {
-        "client_id": EPIC_CLIENT_ID,
-        "redirect_uri": EPIC_REDIRECT_URI,
-        "response_type": "code",
-        "state": state
-    }
-    auth_url = f"https://www.epicgames.com/id/authorize?{urlencode(params)}"
-    raise web.HTTPFound(auth_url)
-
-async def handle_epic_callback(request):
-    error = request.query.get("error")
-    if error:
-        err_desc = request.query.get("error_description", "No description provided.")
-        return web.Response(text=f"Epic OAuth Error: {error} - {err_desc}", status=400)
-
-    code = request.query.get("code")
-    state = request.query.get("state")
-
-    if not state or not code:
-        return web.Response(text="Missing state or authorization code.", status=400)
-
-    state_row = await db_controller.fetchone(
-        "SELECT discord_id, expires_at FROM oauth_states WHERE state = ?", (state,)
-    )
-    
-    await db_controller.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
-    
-    if not state_row or time.time() > state_row[1]:
-        return web.Response(text="Invalid or expired OAuth state.", status=400)
-
-    discord_id = state_row[0]
-
-    token_url = "https://api.epicgames.dev/epic/oauth/v1/token"
-    payload = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "client_id": EPIC_CLIENT_ID,
-        "client_secret": EPIC_CLIENT_SECRET,
-        "redirect_uri": EPIC_REDIRECT_URI
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(token_url, data=payload) as resp:
-            if resp.status != 200:
-                return web.Response(text="Failed to exchange token with Epic Games.", status=500)
-            token_data = await resp.json()
-
-    access_token = encrypt_token(token_data.get("access_token"))
-    refresh_token = encrypt_token(token_data.get("refresh_token"))
-    epic_account_id = token_data.get("account_id", "unknown_epic_id")
-
-    await db_controller.execute(
-        """INSERT INTO epic_accounts 
-        (discord_id, epic_account_id, access_token, refresh_token, updated_at) 
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(discord_id) DO UPDATE SET 
-            epic_account_id = excluded.epic_account_id,
-            access_token = excluded.access_token,
-            refresh_token = excluded.refresh_token,
-            updated_at = CURRENT_TIMESTAMP""",
-        (discord_id, epic_account_id, access_token, refresh_token)
-    )
-
-    return web.Response(text="Epic account successfully linked! You can now close this window and return to Discord.", status=200)
-
-async def handle_epic_unlink(request):
-    auth_token = request.headers.get("Authorization")
-    discord_id = request.query.get("discord_id")
-    
-    if not discord_id or not discord_id.isdigit():
-        return web.Response(text="Missing or invalid discord_id parameter.", status=400)
-    
-    expected_header = f"Bearer {API_SECRET}"
-    if not auth_token or auth_token != expected_header:
-        return web.Response(text="Unauthorized unlink request.", status=401)
-    
-    await db_controller.execute("DELETE FROM epic_accounts WHERE discord_id = ?", (int(discord_id),))
-    return web.Response(text="Epic account unlinked successfully.", status=200)
-
 async def start_web_server(client: ExtendedBotClient):
     app = web.Application()
     app['bot'] = client
     app.router.add_get("/", handle_health)
-    app.router.add_get("/epic/login", handle_epic_login)
-    app.router.add_get("/epic/callback", handle_epic_callback)
-    app.router.add_delete("/epic/unlink", handle_epic_unlink)
     
     runner = web.AppRunner(app)
     await runner.setup()
