@@ -351,9 +351,10 @@ class GiveawaySetupView(discord.ui.View):
         try:
             msg = await self.channel.send(embed=embed)
             
+            # GECORRIGEERD: prize_name gewijzigd naar prize
             await db_controller.execute(
                 """INSERT INTO giveaway_system 
-                (message_id, channel_id, guild_id, prize_name, ends_at, winners, status, processing_started_at, result_message_id,
+                (message_id, channel_id, guild_id, prize, ends_at, winners, status, processing_started_at, result_message_id,
                  req_daily, req_weekly, req_monthly, req_total, bypass_role_id, end_color) 
                 VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0, ?, ?, ?, ?, ?, ?)""",
                 (
@@ -435,16 +436,15 @@ class ExtendedBotClient(commands.Bot):
         try:
             current_time = time.time()
             
-            # 1. Automatic recovery for stuck PROCESSING giveaways older than 15 minutes
             lease_timeout_threshold = current_time - 900
             await db_controller.execute(
                 "UPDATE giveaway_system SET status = 'ACTIVE', processing_started_at = 0 WHERE status = 'PROCESSING' AND processing_started_at < ?",
                 (lease_timeout_threshold,)
             )
 
-            # 2. Fetch active giveaways whose time has expired
+            # GECORRIGEERD: prize_name gewijzigd naar prize
             rows = await db_controller.fetchall(
-                "SELECT message_id, channel_id, guild_id, prize_name, winners, end_color FROM giveaway_system WHERE status = 'ACTIVE' AND ends_at <= ?", 
+                "SELECT message_id, channel_id, guild_id, prize, winners, end_color FROM giveaway_system WHERE status = 'ACTIVE' AND ends_at <= ?", 
                 (current_time,)
             )
             
@@ -455,7 +455,6 @@ class ExtendedBotClient(commands.Bot):
                     giveaway_entry_locks[msg_id] = asyncio.Lock()
 
                 async with giveaway_entry_locks[msg_id]:
-                    # STRICT ATOMIC CLAIM: Only claim if status is exactly 'ACTIVE'
                     claimed_rows = await db_controller.execute(
                         "UPDATE giveaway_system SET status = 'PROCESSING', processing_started_at = ? WHERE message_id = ? AND status = 'ACTIVE'",
                         (current_time, msg_id)
@@ -474,21 +473,18 @@ class ExtendedBotClient(commands.Bot):
                         continue
                     
                     try:
-                        # Fetch the fresh state (including result_message_id) right after claim
                         fresh_record = await db_controller.fetchone(
                             "SELECT result_message_id FROM giveaway_system WHERE message_id = ?",
                             (msg_id,)
                         )
                         result_msg_id = fresh_record[0] if fresh_record else 0
 
-                        # HARD IDEMPOTENCY CHECK: If result_message_id is already present, result was already sent previously!
                         if result_msg_id != 0:
                             await db_controller.execute("DELETE FROM giveaway_participants WHERE message_id = ?", (msg_id,))
                             await db_controller.execute("UPDATE giveaway_system SET status = 'COMPLETED', processing_started_at = 0 WHERE message_id = ?", (msg_id,))
                             giveaway_entry_locks.pop(msg_id, None)
                             continue
 
-                        # HEARTBEAT: Update lease timestamp right before member fetching
                         await db_controller.execute(
                             "UPDATE giveaway_system SET processing_started_at = ? WHERE message_id = ? AND status = 'PROCESSING'",
                             (time.time(), msg_id)
@@ -507,7 +503,6 @@ class ExtendedBotClient(commands.Bot):
                             sys_random.shuffle(user_ids)
                             
                             for i, uid in enumerate(user_ids):
-                                # Periodically send heartbeats during long member fetch loops
                                 if i > 0 and i % 20 == 0:
                                     await db_controller.execute(
                                         "UPDATE giveaway_system SET processing_started_at = ? WHERE message_id = ? AND status = 'PROCESSING'",
@@ -547,7 +542,6 @@ class ExtendedBotClient(commands.Bot):
                         except Exception:
                             pass
 
-                        # ATOMIC COMPLETION & IDEMPOTENCY PERSISTENCE:
                         await db_controller.execute("DELETE FROM giveaway_participants WHERE message_id = ?", (msg_id,))
                         await db_controller.execute(
                             "UPDATE giveaway_system SET status = 'COMPLETED', processing_started_at = 0, result_message_id = ? WHERE message_id = ?",
@@ -557,8 +551,6 @@ class ExtendedBotClient(commands.Bot):
 
                     except (discord.NotFound, discord.HTTPException) as api_err:
                         print(f"API error while processing giveaway {msg_id}: {api_err}")
-                        # CRASH-SAFE IDEMPOTENCY FIX: Check if we successfully posted a result or if a result message was stored. 
-                        # If an error happens, never blindly revert to ACTIVE if a result might have been posted; instead complete or check safely.
                         fresh_record = await db_controller.fetchone(
                             "SELECT result_message_id FROM giveaway_system WHERE message_id = ?",
                             (msg_id,)
@@ -569,15 +561,12 @@ class ExtendedBotClient(commands.Bot):
                                 (msg_id,)
                             )
                         else:
-                            # If no result message was saved, safely mark COMPLETED or release carefully. To prevent duplicate ends, 
-                            # marking COMPLETED or keeping it secure prevents re-running and sending duplicate winners.
                             await db_controller.execute(
                                 "UPDATE giveaway_system SET status = 'COMPLETED', processing_started_at = 0 WHERE message_id = ? AND status = 'PROCESSING'",
                                 (msg_id,)
                             )
                     except Exception as loop_err:
                         print(f"Unexpected error processing giveaway {msg_id}: {loop_err}")
-                        # Safe fallback: Mark completed to prevent endless reprocessing loops on unhandled errors
                         await db_controller.execute(
                             "UPDATE giveaway_system SET status = 'COMPLETED', processing_started_at = 0 WHERE message_id = ? AND status = 'PROCESSING'",
                             (msg_id,)
@@ -619,7 +608,8 @@ class ExtendedBotClient(commands.Bot):
     async def setup_hook(self):
         await db_controller.initialize_database()
 
-        active_giveaways = await db_controller.fetchall("SELECT message_id, channel_id, prize_name, winners FROM giveaway_system WHERE status = 'ACTIVE'")
+        # GECORRIGEERD: prize_name gewijzigd naar prize
+        active_giveaways = await db_controller.fetchall("SELECT message_id, channel_id, prize, winners FROM giveaway_system WHERE status = 'ACTIVE'")
         for row in active_giveaways:
             msg_id, channel_id, prize, winners = row
             view = GiveawayActiveView(msg_id, prize, winners, None)
