@@ -26,7 +26,7 @@ class DatabaseController:
 
     async def create_tables(self):
         async with self.lock:
-            # 1. Maak de tabel aan met alle kolommen zoals het hoort
+            # 1. Maak de basistabel aan met 'prize' er direct in
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS giveaway_system (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,20 +43,26 @@ class DatabaseController:
             """)
             await self.db.commit()
 
-            # 2. Controleer of de kolom 'prize' daadwerkelijk aanwezig is
+            # 2. Vraag alle bestaande kolommen op
             cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
             columns = [row[1] for row in await cursor.fetchall()]
-            
-            if "prize" not in columns:
-                if "prize_name" in columns:
-                    logger.info("Migratie: kolom 'prize_name' hernoemen naar 'prize'...")
-                    await self.db.execute("ALTER TABLE giveaway_system RENAME COLUMN prize_name TO prize;")
-                else:
-                    logger.info("Migratie: ontbrekende kolom 'prize' toevoegen...")
-                    await self.db.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
-                await self.db.commit()
 
-            # Controleer en voeg eventuele andere ontbrekende kolommen toe zonder ze weg te moffelen
+            # 3. Voeg 'prize' toe via universele ADD COLUMN (geen gevaarlijke RENAME)
+            if "prize" not in columns:
+                await self.db.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
+                await self.db.commit()
+                logger.info("Database migratie: kolom 'prize' succesvol toegevoegd.")
+
+            # 4. Als de oude 'prize_name' kolom bestond, kopieer de data naar 'prize'
+            if "prize_name" in columns and "prize" in columns:
+                try:
+                    await self.db.execute("UPDATE giveaway_system SET prize = prize_name WHERE prize IS NULL;")
+                    await self.db.commit()
+                    logger.info("Database migratie: data van 'prize_name' overgezet naar 'prize'.")
+                except Exception as e:
+                    logger.warning(f"Kon prize_name data niet kopiëren: {e}")
+
+            # 5. Controleer op overige optionele kolommen
             optional_columns = {
                 "result_message_id": "INTEGER DEFAULT 0",
                 "processing_started_at": "INTEGER DEFAULT 0",
@@ -65,9 +71,9 @@ class DatabaseController:
             
             for col_name, col_def in optional_columns.items():
                 if col_name not in columns:
-                    logger.info(f"Migratie: ontbrekende kolom '{col_name}' toevoegen...")
                     await self.db.execute(f"ALTER TABLE giveaway_system ADD COLUMN {col_name} {col_def};")
                     await self.db.commit()
+                    logger.info(f"Database migratie: kolom '{col_name}' toegevoegd.")
 
     # --- GENERIEKE HELPER METHODES ---
 
