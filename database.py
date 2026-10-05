@@ -5,7 +5,7 @@ import logging
 
 logger = logging.getLogger("giveaway_bot")
 
-class GiveawayDatabase:
+class DatabaseController:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.db: aiosqlite.Connection = None
@@ -88,8 +88,7 @@ class GiveawayDatabase:
 
     async def set_result_pending(self, giveaway_id: int, worker_token: str, result_message_id: int):
         """
-        Slaat de result_message_id alvast op *voordat* de status op COMPLETED gaat,
-        zodat we bij een crash weten dat het bericht al verstuurd is (idempotentie).
+        Slaat de result_message_id alvast op *voordat* de status op COMPLETED gaat.
         """
         async with self.lock:
             query = """
@@ -114,7 +113,7 @@ class GiveawayDatabase:
             return cursor.rowcount > 0
 
     async def release_giveaway_lease(self, giveaway_id: int, worker_token: str):
-        """Zet de giveaway terug naar ACTIVE bij een onverwachte fout."""
+        """Zet de giveaway terug naar ACTIVE bij een onverwachte fout of tijdelijke storing."""
         async with self.lock:
             query = """
                 UPDATE giveaway_system
@@ -127,6 +126,7 @@ class GiveawayDatabase:
             await self.db.commit()
 
     async def mark_giveaway_completed_safely(self, giveaway_id: int, worker_token: str, result_message_id: int = 0):
+        """Markeert als COMPLETED als het originele giveaway-bericht op Discord definitief weg is."""
         async with self.lock:
             query = """
                 UPDATE giveaway_system
