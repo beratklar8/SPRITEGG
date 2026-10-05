@@ -16,6 +16,10 @@ class DatabaseController:
         await self.db.execute("PRAGMA journal_mode=WAL;")
         await self.create_tables()
 
+    # Alias zodat `.initialize_database()` in main.py ook direct werkt
+    async def initialize_database(self):
+        await self.connect()
+
     async def close(self):
         if self.db:
             await self.db.close()
