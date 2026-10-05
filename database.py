@@ -42,6 +42,29 @@ class DatabaseController:
             """)
             await self.db.commit()
 
+    # --- GENERIEKE HELPER METHODES (Zodat fetchall / execute direct werken) ---
+
+    async def execute(self, query: str, parameters: tuple = ()):
+        """Voert een losse query uit (INSERT, UPDATE, DELETE) en commit direct."""
+        async with self.lock:
+            cursor = await self.db.execute(query, parameters)
+            await self.db.commit()
+            return cursor
+
+    async def fetchall(self, query: str, parameters: tuple = ()):
+        """Haalt meerdere rijen op met een SELECT query."""
+        async with self.lock:
+            async with self.db.execute(query, parameters) as cursor:
+                return await cursor.fetchall()
+
+    async def fetchone(self, query: str, parameters: tuple = ()):
+        """Haalt één rij op met een SELECT query."""
+        async with self.lock:
+            async with self.db.execute(query, parameters) as cursor:
+                return await cursor.fetchone()
+
+    # --- SPECIFIEKE GIVEAWAY METHODES ---
+
     async def claim_giveaway(self, worker_token: str, current_time: int):
         """
         Claimt een actieve giveaway waarvan de eindtijd (ends_at) is verstreken,
