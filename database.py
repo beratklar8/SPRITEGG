@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger("giveaway_bot")
 
 class DatabaseController:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str = "bot_database.db"):
         self.db_path = db_path
         self.db: aiosqlite.Connection = None
         self.lock = asyncio.Lock()
