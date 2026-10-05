@@ -26,13 +26,12 @@ class DatabaseController:
 
     async def create_tables(self):
         async with self.lock:
-            # 1. Zorg dat de basistabel bestaat
+            # 1. Zorg dat de basistabel minimaal bestaat
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS giveaway_system (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id INTEGER UNIQUE,
                     channel_id INTEGER,
-                    prize TEXT,
                     winner_count INTEGER,
                     ends_at INTEGER,
                     status TEXT DEFAULT 'ACTIVE',
@@ -42,17 +41,30 @@ class DatabaseController:
                 )
             """)
             
-            # 2. Automatische migratie: controleer op oude kolomnamen zoals 'prize_name'
+            # 2. Controleer op alle vereiste kolommen en voeg ze toe als ze ontbreken
             cursor = await self.db.execute("PRAGMA table_info(giveaway_system);")
             columns = [row[1] for row in await cursor.fetchall()]
             
+            # Controleer op 'prize' (of migreer van 'prize_name' indien aanwezig)
             if "prize" not in columns:
                 if "prize_name" in columns:
                     await self.db.execute("ALTER TABLE giveaway_system RENAME COLUMN prize_name TO prize;")
-                    logger.info("Database migratie: kolom 'prize_name' succesvol hernoemd naar 'prize'.")
+                    logger.info("Database migratie: kolom 'prize_name' hernoemd naar 'prize'.")
                 else:
                     await self.db.execute("ALTER TABLE giveaway_system ADD COLUMN prize TEXT;")
-                    logger.info("Database migratie: kolom 'prize' toegevoegd aan giveaway_system.")
+                    logger.info("Database migratie: ontbrekende kolom 'prize' toegevoegd.")
+
+            # Extra veiligheid: check ook andere kolommen voor het geval de tabel heel oud is
+            optional_columns = {
+                "result_message_id": "INTEGER DEFAULT 0",
+                "processing_started_at": "INTEGER DEFAULT 0",
+                "processing_owner": "TEXT DEFAULT NULL"
+            }
+            
+            for col_name, col_def in optional_columns.items():
+                if col_name not in columns:
+                    await self.db.execute(f"ALTER TABLE giveaway_system ADD COLUMN {col_name} {col_def};")
+                    logger.info(f"Database migratie: ontbrekende kolom '{col_name}' toegevoegd.")
 
             await self.db.commit()
 
