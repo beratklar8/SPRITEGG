@@ -7,10 +7,7 @@ import time
 
 import discord
 
-from database import (
-    Database,
-    new_token,
-)
+from database import Database
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +15,10 @@ PROCESSING_TIMEOUT = 120
 RESULT_LEASE_TIMEOUT = 120
 WATCHDOG_INTERVAL = 30
 MAX_RESULT_RETRIES = 5
+
+
+def new_token(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_urlsafe(32)}"
 
 
 class GiveawayWorker:
@@ -47,7 +48,7 @@ class GiveawayWorker:
         ] = {}
 
     # ============================================================
-    # Lifecycle
+    # LIFECYCLE
     # ============================================================
 
     async def start(self):
@@ -72,13 +73,13 @@ class GiveawayWorker:
 
         tasks = []
 
-        for task in (
-            self.processor_task,
-            self.watchdog_task,
-        ):
-            if task is not None:
-                task.cancel()
-                tasks.append(task)
+        if self.processor_task is not None:
+            self.processor_task.cancel()
+            tasks.append(self.processor_task)
+
+        if self.watchdog_task is not None:
+            self.watchdog_task.cancel()
+            tasks.append(self.watchdog_task)
 
         if tasks:
             await asyncio.gather(
@@ -102,7 +103,7 @@ class GiveawayWorker:
         self.active_tasks.clear()
 
     # ============================================================
-    # Main processor
+    # PROCESSOR
     # ============================================================
 
     async def processor_loop(self):
@@ -114,7 +115,7 @@ class GiveawayWorker:
                     )
                 )
 
-                retrying = (
+                retries = (
                     await self.db.get_result_retries(
                         self.concurrency
                     )
@@ -127,11 +128,14 @@ class GiveawayWorker:
 
                 message_ids.update(
                     int(row["message_id"])
-                    for row in retrying
+                    for row in retries
                 )
 
                 for message_id in message_ids:
-                    if message_id in self.active_tasks:
+                    if (
+                        message_id
+                        in self.active_tasks
+                    ):
                         continue
 
                     task = asyncio.create_task(
@@ -228,7 +232,7 @@ class GiveawayWorker:
                 )
 
     # ============================================================
-    # Winner processing
+    # WINNAARS
     # ============================================================
 
     async def process_expired(
@@ -266,7 +270,6 @@ class GiveawayWorker:
                 if row is None:
                     return
 
-                # Herbereken de echte count.
                 participant_count = len(
                     participants
                 )
@@ -280,7 +283,7 @@ class GiveawayWorker:
                     participant_count,
                 )
 
-                if winner_count:
+                if winner_count > 0:
                     winners = (
                         secrets.SystemRandom().sample(
                             participants,
@@ -340,7 +343,7 @@ class GiveawayWorker:
         )
 
     # ============================================================
-    # Result
+    # RESULTAAT
     # ============================================================
 
     async def send_result(
@@ -397,7 +400,9 @@ class GiveawayWorker:
             )
 
             if existing is not None:
-                result_message_id = existing.id
+                result_message_id = (
+                    existing.id
+                )
 
             else:
                 if winners:
@@ -408,7 +413,8 @@ class GiveawayWorker:
 
                     description = (
                         f"🎉 Gefeliciteerd {mentions}!\n\n"
-                        f"Jullie hebben **{row['prize']}** gewonnen!"
+                        f"Jullie hebben **{row['prize']}** "
+                        "gewonnen!"
                     )
                 else:
                     description = (
@@ -445,8 +451,8 @@ class GiveawayWorker:
 
             if not completed:
                 log.warning(
-                    "Resultaat %s is verzonden, "
-                    "maar completion-fence faalde.",
+                    "Resultaat %s verzonden, "
+                    "maar DB completion-fence faalde.",
                     message_id,
                 )
 
@@ -605,7 +611,10 @@ class GiveawayWorker:
                         8,
                     ),
                 )
-                + random.uniform(0, 2)
+                + random.uniform(
+                    0,
+                    2,
+                )
             )
 
         await self.db.result_failed(
@@ -619,7 +628,7 @@ class GiveawayWorker:
         )
 
     # ============================================================
-    # Idempotency
+    # IDEMPOTENCY
     # ============================================================
 
     async def find_existing_result(
@@ -635,7 +644,7 @@ class GiveawayWorker:
             limit=100
         ):
             if (
-                self.bot.user
+                self.bot.user is not None
                 and message.author.id
                 != self.bot.user.id
             ):
@@ -652,7 +661,7 @@ class GiveawayWorker:
         return None
 
     # ============================================================
-    # Disable UI
+    # UI
     # ============================================================
 
     async def disable_giveaway(
@@ -698,24 +707,24 @@ class GiveawayWorker:
             )
 
     # ============================================================
-    # Watchdog
+    # WATCHDOG
     # ============================================================
 
     async def watchdog_loop(self):
         while not self.stop_event.is_set():
             try:
-                processing_cutoff = (
+                cutoff = (
                     time.time()
                     - PROCESSING_TIMEOUT
                 )
 
-                rows = (
+                processing = (
                     await self.db.stale_processing(
-                        processing_cutoff
+                        cutoff
                     )
                 )
 
-                for row in rows:
+                for row in processing:
                     message_id = int(
                         row["message_id"]
                     )
@@ -742,13 +751,13 @@ class GiveawayWorker:
                     - RESULT_LEASE_TIMEOUT
                 )
 
-                rows = (
+                results = (
                     await self.db.stale_result_leases(
                         result_cutoff
                     )
                 )
 
-                for row in rows:
+                for row in results:
                     await self.db.recover_result_lease(
                         int(row["message_id"]),
                         row[
