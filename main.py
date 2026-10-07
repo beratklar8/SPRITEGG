@@ -8,45 +8,71 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from aiohttp import web
 
 from database import Database
 from giveaways_worker import GiveawayWorker
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format=(
-        "%(asctime)s | "
-        "%(levelname)s | "
-        "%(name)s | "
-        "%(message)s"
-    ),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
-log = logging.getLogger(
-    "giveaway-bot"
-)
+log = logging.getLogger("giveaway-bot")
 
-
-TOKEN = os.getenv(
-    "DISCORD_TOKEN"
-)
-
-DATABASE_PATH = os.getenv(
-    "GIVEAWAY_DB",
-    "giveaways.db",
-)
+TOKEN = os.getenv("DISCORD_TOKEN")
+DATABASE_PATH = os.getenv("GIVEAWAY_DB", "giveaways.db")
 
 
 def new_token(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(32)}"
 
 
-# ================================================================
+# ============================================================
+# RENDER HEALTH SERVER
+# ============================================================
+
+async def health_handler(request):
+    return web.Response(text="OK")
+
+
+async def start_web_server():
+    app = web.Application()
+
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.getenv("PORT", "10000"))
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port,
+    )
+
+    await site.start()
+
+    log.info(
+        "Render health server gestart op poort %s",
+        port,
+    )
+
+    return runner
+
+
+# ============================================================
 # GIVEAWAY VIEW
-# ================================================================
+# ============================================================
 
 class GiveawayView(discord.ui.View):
     def __init__(
@@ -55,9 +81,7 @@ class GiveawayView(discord.ui.View):
         message_id: int | None = None,
         disabled: bool = False,
     ):
-        super().__init__(
-            timeout=None
-        )
+        super().__init__(timeout=None)
 
         self.bot = bot
         self.message_id = message_id
@@ -69,9 +93,7 @@ class GiveawayView(discord.ui.View):
             disabled=disabled,
         )
 
-        button.callback = (
-            self.join_callback
-        )
+        button.callback = self.join_callback
 
         self.add_item(button)
 
@@ -86,33 +108,21 @@ class GiveawayView(discord.ui.View):
             )
             return
 
-        message_id = (
-            interaction.message.id
-        )
+        message_id = interaction.message.id
 
-        success, reason = (
-            await self.bot.db.add_participant(
-                message_id,
-                interaction.user.id,
-            )
+        success, reason = await self.bot.db.add_participant(
+            message_id,
+            interaction.user.id,
         )
 
         responses = {
-            "JOINED": (
-                "Je doet mee! 🎉"
-            ),
+            "JOINED": "Je doet mee! 🎉",
             "ALREADY_JOINED": (
                 "Je doet al mee aan deze giveaway."
             ),
-            "FULL": (
-                "Deze giveaway zit vol."
-            ),
-            "CLOSED": (
-                "Deze giveaway is al gesloten."
-            ),
-            "NOT_FOUND": (
-                "Deze giveaway bestaat niet."
-            ),
+            "FULL": "Deze giveaway zit vol.",
+            "CLOSED": "Deze giveaway is al gesloten.",
+            "NOT_FOUND": "Deze giveaway bestaat niet.",
         }
 
         await interaction.response.send_message(
@@ -124,9 +134,9 @@ class GiveawayView(discord.ui.View):
         )
 
 
-# ================================================================
+# ============================================================
 # BOT
-# ================================================================
+# ============================================================
 
 class GiveawayBot(commands.Bot):
     def __init__(self):
@@ -153,9 +163,9 @@ class GiveawayBot(commands.Bot):
         self.startup_complete = False
         self.shutdown_started = False
 
-    # ============================================================
-    # VIEWS
-    # ============================================================
+    # ========================================================
+    # VIEW
+    # ========================================================
 
     def create_giveaway_view(
         self,
@@ -168,34 +178,41 @@ class GiveawayBot(commands.Bot):
             disabled,
         )
 
-    # ============================================================
+    # ========================================================
     # SETUP
-    # ============================================================
+    # ========================================================
 
     async def setup_hook(self):
+        log.info("Database verbinden...")
+
         await self.db.connect()
 
         await self.db.integrity_check()
 
-        # Persistent view.
+        log.info("Database OK.")
+
+        # Persistent Discord UI
         self.add_view(
             self.create_giveaway_view()
         )
 
-        # Slash command registreren.
-        self.tree.add_command(
-            self.giveaway
-        )
+        # Slash command registreren
+        try:
+            self.tree.add_command(
+                self.giveaway
+            )
+        except discord.app_commands.errors.CommandAlreadyRegistered:
+            pass
 
         await self.tree.sync()
 
         log.info(
-            "Discord commands gesynchroniseerd."
+            "Discord slash commands gesynchroniseerd."
         )
 
-    # ============================================================
+    # ========================================================
     # READY
-    # ============================================================
+    # ========================================================
 
     async def on_ready(self):
         if self.startup_complete:
@@ -204,7 +221,7 @@ class GiveawayBot(commands.Bot):
         self.startup_complete = True
 
         log.info(
-            "Ingelogd als %s.",
+            "Ingelogd als %s",
             self.user,
         )
 
@@ -212,19 +229,23 @@ class GiveawayBot(commands.Bot):
 
         await self.worker.start()
 
-    # ============================================================
-    # RECOVERY
-    # ============================================================
-
-    async def startup_reconciliation(self):
-        cutoff = (
-            time.time() - 120
+        log.info(
+            "Giveaway worker gestart."
         )
 
-        processing = (
-            await self.db.stale_processing(
-                cutoff
-            )
+    # ========================================================
+    # STARTUP RECOVERY
+    # ========================================================
+
+    async def startup_reconciliation(self):
+        cutoff = time.time() - 120
+
+        # ----------------------------------------------------
+        # PROCESSING recovery
+        # ----------------------------------------------------
+
+        processing = await self.db.stale_processing(
+            cutoff
         )
 
         for row in processing:
@@ -245,9 +266,12 @@ class GiveawayBot(commands.Bot):
             await self.db.recover_processing(
                 message_id,
                 row["processing_token"],
-                row["result_winners"]
-                is not None,
+                row["result_winners"] is not None,
             )
+
+        # ----------------------------------------------------
+        # RESULT lease recovery
+        # ----------------------------------------------------
 
         result_leases = (
             await self.db.stale_result_leases(
@@ -258,18 +282,16 @@ class GiveawayBot(commands.Bot):
         for row in result_leases:
             await self.db.recover_result_lease(
                 int(row["message_id"]),
-                row[
-                    "result_send_owner_token"
-                ],
+                row["result_send_owner_token"],
             )
 
         log.info(
             "Startup reconciliation voltooid."
         )
 
-    # ============================================================
+    # ========================================================
     # GIVEAWAY COMMAND
-    # ============================================================
+    # ========================================================
 
     @app_commands.command(
         name="giveaway",
@@ -285,21 +307,9 @@ class GiveawayBot(commands.Bot):
         self,
         interaction: discord.Interaction,
         prize: str,
-        minutes: app_commands.Range[
-            int,
-            1,
-            10080,
-        ],
-        winners: app_commands.Range[
-            int,
-            1,
-            50,
-        ],
-        max_participants: app_commands.Range[
-            int,
-            1,
-            100000,
-        ],
+        minutes: app_commands.Range[int, 1, 10080],
+        winners: app_commands.Range[int, 1, 50],
+        max_participants: app_commands.Range[int, 1, 100000],
     ):
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -323,8 +333,7 @@ class GiveawayBot(commands.Bot):
             "create"
         )
 
-        # Eenmalig berekenen.
-        # Een recovery mag de eindtijd niet verlengen.
+        # Eindtijd slechts één keer berekenen.
         expires_at = (
             time.time()
             + int(minutes) * 60
@@ -332,18 +341,14 @@ class GiveawayBot(commands.Bot):
 
         payload = {
             "prize": prize,
-            "winner_count": int(
-                winners
-            ),
-            "max_participants": int(
-                max_participants
-            ),
+            "winner_count": int(winners),
+            "max_participants": int(max_participants),
             "expires_at": expires_at,
         }
 
-        # --------------------------------------------------------
-        # Creation intent
-        # --------------------------------------------------------
+        # ====================================================
+        # CREATION INTENT
+        # ====================================================
 
         await self.db.create_intent(
             creation_token,
@@ -352,9 +357,9 @@ class GiveawayBot(commands.Bot):
             payload,
         )
 
-        # --------------------------------------------------------
-        # Discord bericht
-        # --------------------------------------------------------
+        # ====================================================
+        # DISCORD MESSAGE
+        # ====================================================
 
         embed = discord.Embed(
             title="🎉 Giveaway",
@@ -374,7 +379,8 @@ class GiveawayBot(commands.Bot):
             )
         )
 
-        # Disabled totdat DB-record bestaat.
+        # Eerst disabled.
+        # Pas na succesvolle DB-opslag wordt de knop actief.
         message = await interaction.channel.send(
             embed=embed,
             view=self.create_giveaway_view(
@@ -382,9 +388,9 @@ class GiveawayBot(commands.Bot):
             ),
         )
 
-        # --------------------------------------------------------
-        # Discord message opgeslagen
-        # --------------------------------------------------------
+        # ====================================================
+        # MESSAGE ID OPSLAAN
+        # ====================================================
 
         intent_saved = (
             await self.db.set_intent_message(
@@ -411,21 +417,17 @@ class GiveawayBot(commands.Bot):
 
             return
 
-        # --------------------------------------------------------
-        # Giveaway DB-record
-        # --------------------------------------------------------
+        # ====================================================
+        # DATABASE RECORD
+        # ====================================================
 
         created = await self.db.create_giveaway(
             message_id=message.id,
             guild_id=interaction.guild.id,
             channel_id=interaction.channel.id,
             prize=prize,
-            winner_count=int(
-                winners
-            ),
-            max_participants=int(
-                max_participants
-            ),
+            winner_count=int(winners),
+            max_participants=int(max_participants),
             expires_at=expires_at,
             creation_token=creation_token,
         )
@@ -453,9 +455,9 @@ class GiveawayBot(commands.Bot):
 
             return
 
-        # --------------------------------------------------------
-        # Activation
-        # --------------------------------------------------------
+        # ====================================================
+        # ACTIVATION
+        # ====================================================
 
         await self.db.set_intent_activation_pending(
             creation_token
@@ -477,9 +479,9 @@ class GiveawayBot(commands.Bot):
             ephemeral=True,
         )
 
-    # ============================================================
+    # ========================================================
     # SHUTDOWN
-    # ============================================================
+    # ========================================================
 
     async def close(self):
         if self.shutdown_started:
@@ -492,28 +494,38 @@ class GiveawayBot(commands.Bot):
         )
 
         await self.worker.stop()
+
         await self.db.close()
 
         await super().close()
 
 
-# ================================================================
+# ============================================================
 # START
-# ================================================================
+# ============================================================
 
 if not TOKEN:
     raise RuntimeError(
-        "DISCORD_TOKEN ontbreekt."
+        "DISCORD_TOKEN ontbreekt in de environment variables."
     )
 
 
 bot = GiveawayBot()
 
 
+async def main():
+    web_runner = await start_web_server()
+
+    try:
+        await bot.start(TOKEN)
+
+    finally:
+        await web_runner.cleanup()
+
+
 if __name__ == "__main__":
     try:
-        asyncio.run(
-            bot.start(TOKEN)
-        )
+        asyncio.run(main())
+
     except KeyboardInterrupt:
         pass
