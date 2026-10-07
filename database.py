@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import secrets
 import time
 from contextlib import asynccontextmanager
 
@@ -20,10 +19,6 @@ DB_VERSION = 4
 
 def now() -> float:
     return time.time()
-
-
-def token(prefix: str) -> str:
-    return f"{prefix}_{secrets.token_urlsafe(32)}"
 
 
 class Database:
@@ -56,6 +51,7 @@ class Database:
     def _db(self):
         if self.conn is None:
             raise RuntimeError("Database is not connected")
+
         return self.conn
 
     @asynccontextmanager
@@ -74,7 +70,7 @@ class Database:
                 await db.commit()
 
     # ============================================================
-    # Schema
+    # MIGRATIONS
     # ============================================================
 
     async def migrate(self):
@@ -273,7 +269,7 @@ class Database:
             )
 
     # ============================================================
-    # Creation intents
+    # CREATION INTENTS
     # ============================================================
 
     async def create_intent(
@@ -297,13 +293,24 @@ class Database:
                     created_at,
                     updated_at
                 )
-                VALUES (?, 'PENDING', ?, ?, ?, ?, ?)
+                VALUES (
+                    ?,
+                    'PENDING',
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?
+                )
                 """,
                 (
                     creation_token,
                     guild_id,
                     channel_id,
-                    json.dumps(payload),
+                    json.dumps(
+                        payload,
+                        separators=(",", ":"),
+                    ),
                     now(),
                     now(),
                 ),
@@ -460,7 +467,7 @@ class Database:
         )
 
     # ============================================================
-    # Giveaway
+    # GIVEAWAYS
     # ============================================================
 
     async def create_giveaway(
@@ -493,8 +500,17 @@ class Database:
                     created_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, 'ACTIVE',
-                    ?, ?, 0, ?, ?, ?
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    'ACTIVE',
+                    ?,
+                    ?,
+                    0,
+                    ?,
+                    ?,
+                    ?
                 )
                 """,
                 (
@@ -557,6 +573,7 @@ class Database:
         return await db.execute_fetchall(
             """
             SELECT message_id
+
             FROM giveaway_system
 
             WHERE
@@ -564,6 +581,7 @@ class Database:
                 AND expires_at <= ?
 
             ORDER BY expires_at ASC
+
             LIMIT ?
             """,
             (
@@ -581,6 +599,7 @@ class Database:
         return await db.execute_fetchall(
             """
             SELECT message_id
+
             FROM giveaway_system
 
             WHERE
@@ -590,7 +609,9 @@ class Database:
                     OR next_retry_at <= ?
                 )
 
-            ORDER BY next_retry_at ASC
+            ORDER BY
+                COALESCE(next_retry_at, 0) ASC
+
             LIMIT ?
             """,
             (
@@ -600,7 +621,7 @@ class Database:
         )
 
     # ============================================================
-    # Processing lease
+    # PROCESSING
     # ============================================================
 
     async def claim_processing(
@@ -712,7 +733,7 @@ class Database:
             return cur.rowcount == 1
 
     # ============================================================
-    # Result lease
+    # RESULT LEASE
     # ============================================================
 
     async def claim_result(
@@ -820,7 +841,9 @@ class Database:
                     if permanent
                     else "PROCESSING_RESULT",
                     retry_count,
-                    None if permanent else next_retry_at,
+                    None
+                    if permanent
+                    else next_retry_at,
                     error_code[:100],
                     str(error_message)[:1000],
                     message_id,
@@ -831,7 +854,7 @@ class Database:
             return cur.rowcount == 1
 
     # ============================================================
-    # Participants
+    # PARTICIPANTS
     # ============================================================
 
     async def add_participant(
@@ -845,7 +868,9 @@ class Database:
                 SELECT
                     status,
                     max_participants
+
                 FROM giveaway_system
+
                 WHERE message_id=?
                 """,
                 (message_id,),
@@ -860,7 +885,9 @@ class Database:
             existing = await db.execute_fetchone(
                 """
                 SELECT 1
+
                 FROM giveaway_participants
+
                 WHERE
                     message_id=?
                     AND user_id=?
@@ -877,7 +904,9 @@ class Database:
             count = await db.execute_fetchone(
                 """
                 SELECT COUNT(*) AS count
+
                 FROM giveaway_participants
+
                 WHERE message_id=?
                 """,
                 (message_id,),
@@ -934,8 +963,11 @@ class Database:
         rows = await db.execute_fetchall(
             """
             SELECT user_id
+
             FROM giveaway_participants
+
             WHERE message_id=?
+
             ORDER BY joined_at ASC
             """,
             (message_id,),
@@ -970,7 +1002,7 @@ class Database:
             )
 
     # ============================================================
-    # Recovery
+    # RECOVERY
     # ============================================================
 
     async def stale_processing(
@@ -1009,7 +1041,7 @@ class Database:
 
         async with self.transaction() as db:
             cur = await db.execute(
-                f"""
+                """
                 UPDATE giveaway_system
 
                 SET
@@ -1026,7 +1058,7 @@ class Database:
                 (
                     target,
                     now()
-                    if target == PROCESSING_RESULT
+                    if target == "PROCESSING_RESULT"
                     else None,
                     message_id,
                     processing_token,
