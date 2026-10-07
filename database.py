@@ -77,9 +77,10 @@ class Database:
         db = self._db()
 
         async with self.lock:
-            row = await db.execute_fetchone(
+            async with db.execute(
                 "PRAGMA user_version"
-            )
+            ) as cursor:
+                row = await cursor.fetchone()
 
             version = int(row[0])
 
@@ -200,9 +201,10 @@ class Database:
                 version = 2
 
             if version < 3:
-                columns = await db.execute_fetchall(
+                async with db.execute(
                     "PRAGMA table_info(giveaway_system)"
-                )
+                ) as cursor:
+                    columns = await cursor.fetchall()
 
                 names = {
                     row["name"]
@@ -224,9 +226,10 @@ class Database:
                 version = 3
 
             if version < 4:
-                columns = await db.execute_fetchall(
+                async with db.execute(
                     "PRAGMA table_info(giveaway_system)"
-                )
+                ) as cursor:
+                    columns = await cursor.fetchall()
 
                 names = {
                     row["name"]
@@ -245,23 +248,27 @@ class Database:
                     "PRAGMA user_version = 4"
                 )
 
+                version = 4
+
             await db.commit()
 
     async def integrity_check(self):
         db = self._db()
 
-        result = await db.execute_fetchone(
+        async with db.execute(
             "PRAGMA integrity_check"
-        )
+        ) as cursor:
+            result = await cursor.fetchone()
 
         if result[0] != "ok":
             raise RuntimeError(
                 f"SQLite integrity check failed: {result[0]}"
             )
 
-        foreign = await db.execute_fetchall(
+        async with db.execute(
             "PRAGMA foreign_key_check"
-        )
+        ) as cursor:
+            foreign = await cursor.fetchall()
 
         if foreign:
             raise RuntimeError(
@@ -452,7 +459,7 @@ class Database:
     async def get_recovery_intents(self):
         db = self._db()
 
-        return await db.execute_fetchall(
+        async with db.execute(
             """
             SELECT *
             FROM giveaway_creation_intents
@@ -464,7 +471,8 @@ class Database:
             )
             ORDER BY created_at
             """
-        )
+        ) as cursor:
+            return await cursor.fetchall()
 
     # ============================================================
     # GIVEAWAYS
@@ -555,14 +563,15 @@ class Database:
     ):
         db = self._db()
 
-        return await db.execute_fetchone(
+        async with db.execute(
             """
             SELECT *
             FROM giveaway_system
             WHERE message_id=?
             """,
             (message_id,),
-        )
+        ) as cursor:
+            return await cursor.fetchone()
 
     async def get_expired_giveaways(
         self,
@@ -570,7 +579,7 @@ class Database:
     ):
         db = self._db()
 
-        return await db.execute_fetchall(
+        async with db.execute(
             """
             SELECT message_id
 
@@ -588,7 +597,8 @@ class Database:
                 now(),
                 limit,
             ),
-        )
+        ) as cursor:
+            return await cursor.fetchall()
 
     async def get_result_retries(
         self,
@@ -596,7 +606,7 @@ class Database:
     ):
         db = self._db()
 
-        return await db.execute_fetchall(
+        async with db.execute(
             """
             SELECT message_id
 
@@ -618,7 +628,8 @@ class Database:
                 now(),
                 limit,
             ),
-        )
+        ) as cursor:
+            return await cursor.fetchall()
 
     # ============================================================
     # PROCESSING
@@ -863,7 +874,8 @@ class Database:
         user_id: int,
     ) -> tuple[bool, str]:
         async with self.transaction() as db:
-            giveaway = await db.execute_fetchone(
+
+            async with db.execute(
                 """
                 SELECT
                     status,
@@ -874,7 +886,8 @@ class Database:
                 WHERE message_id=?
                 """,
                 (message_id,),
-            )
+            ) as cursor:
+                giveaway = await cursor.fetchone()
 
             if giveaway is None:
                 return False, "NOT_FOUND"
@@ -882,7 +895,7 @@ class Database:
             if giveaway["status"] != ACTIVE:
                 return False, "CLOSED"
 
-            existing = await db.execute_fetchone(
+            async with db.execute(
                 """
                 SELECT 1
 
@@ -896,12 +909,13 @@ class Database:
                     message_id,
                     user_id,
                 ),
-            )
+            ) as cursor:
+                existing = await cursor.fetchone()
 
             if existing:
                 return False, "ALREADY_JOINED"
 
-            count = await db.execute_fetchone(
+            async with db.execute(
                 """
                 SELECT COUNT(*) AS count
 
@@ -910,7 +924,8 @@ class Database:
                 WHERE message_id=?
                 """,
                 (message_id,),
-            )
+            ) as cursor:
+                count = await cursor.fetchone()
 
             if count["count"] >= giveaway[
                 "max_participants"
@@ -960,7 +975,7 @@ class Database:
     ) -> list[int]:
         db = self._db()
 
-        rows = await db.execute_fetchall(
+        async with db.execute(
             """
             SELECT user_id
 
@@ -971,7 +986,8 @@ class Database:
             ORDER BY joined_at ASC
             """,
             (message_id,),
-        )
+        ) as cursor:
+            rows = await cursor.fetchall()
 
         return [
             int(row["user_id"])
@@ -1011,7 +1027,7 @@ class Database:
     ):
         db = self._db()
 
-        return await db.execute_fetchall(
+        async with db.execute(
             """
             SELECT
                 message_id,
@@ -1025,7 +1041,8 @@ class Database:
                 AND processing_started_at < ?
             """,
             (cutoff,),
-        )
+        ) as cursor:
+            return await cursor.fetchall()
 
     async def recover_processing(
         self,
@@ -1073,7 +1090,7 @@ class Database:
     ):
         db = self._db()
 
-        return await db.execute_fetchall(
+        async with db.execute(
             """
             SELECT
                 message_id,
@@ -1087,7 +1104,8 @@ class Database:
                 AND result_send_started_at < ?
             """,
             (cutoff,),
-        )
+        ) as cursor:
+            return await cursor.fetchall()
 
     async def recover_result_lease(
         self,
@@ -1117,3 +1135,13 @@ class Database:
             )
 
             return cur.rowcount == 1
+
+Vervang dus je huidige "database.py" volledig met bovenstaande versie.
+
+Daarna opnieuw deployen. De specifieke fout:
+
+"AttributeError: 'Connection' object has no attribute 'execute_fetchone'"
+
+zou hiermee weg moeten zijn. De "execute_fetchall()"-aanroepen zijn ook allemaal vervangen, zodat je niet direct tegen dezelfde fout met "execute_fetchall()" aanloopt.
+
+Als Render daarna een nieuwe foutmelding geeft, plak alleen die nieuwe foutmelding hier; dan pakken we die volgende aan.
