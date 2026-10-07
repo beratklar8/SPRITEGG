@@ -4,11 +4,11 @@ import os
 import secrets
 import time
 
+from aiohttp import web
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-from aiohttp import web
 
 from database import Database
 from giveaways_worker import GiveawayWorker
@@ -28,7 +28,10 @@ logging.basicConfig(
 log = logging.getLogger("giveaway-bot")
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-DATABASE_PATH = os.getenv("GIVEAWAY_DB", "giveaways.db")
+DATABASE_PATH = os.getenv(
+    "GIVEAWAY_DB",
+    "giveaways.db",
+)
 
 
 def new_token(prefix: str) -> str:
@@ -36,34 +39,64 @@ def new_token(prefix: str) -> str:
 
 
 # ============================================================
-# RENDER HEALTH SERVER
+# RENDER WEB SERVER
 # ============================================================
 
 async def health_handler(request):
-    return web.Response(text="OK")
+    return web.Response(
+        text="Giveaway bot is online."
+    )
+
+
+async def health_json_handler(request):
+    return web.json_response(
+        {
+            "status": "online",
+            "bot": "giveaway",
+        }
+    )
 
 
 async def start_web_server():
     app = web.Application()
 
-    app.router.add_get("/", health_handler)
-    app.router.add_get("/health", health_handler)
+    app.router.add_get(
+        "/",
+        health_handler,
+    )
+
+    app.router.add_get(
+        "/health",
+        health_handler,
+    )
+
+    app.router.add_get(
+        "/health.json",
+        health_json_handler,
+    )
 
     runner = web.AppRunner(app)
+
     await runner.setup()
 
-    port = int(os.getenv("PORT", "10000"))
+    # Render geeft deze variabele automatisch.
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000",
+        )
+    )
 
     site = web.TCPSite(
         runner,
-        "0.0.0.0",
-        port,
+        host="0.0.0.0",
+        port=port,
     )
 
     await site.start()
 
     log.info(
-        "Render health server gestart op poort %s",
+        "HTTP server gestart op 0.0.0.0:%s",
         port,
     )
 
@@ -75,13 +108,16 @@ async def start_web_server():
 # ============================================================
 
 class GiveawayView(discord.ui.View):
+
     def __init__(
         self,
         bot,
         message_id: int | None = None,
         disabled: bool = False,
     ):
-        super().__init__(timeout=None)
+        super().__init__(
+            timeout=None
+        )
 
         self.bot = bot
         self.message_id = message_id
@@ -110,19 +146,42 @@ class GiveawayView(discord.ui.View):
 
         message_id = interaction.message.id
 
-        success, reason = await self.bot.db.add_participant(
-            message_id,
-            interaction.user.id,
-        )
+        try:
+            success, reason = (
+                await self.bot.db.add_participant(
+                    message_id,
+                    interaction.user.id,
+                )
+            )
+        except Exception:
+            log.exception(
+                "Fout bij deelnemen aan giveaway %s",
+                message_id,
+            )
+
+            await interaction.response.send_message(
+                "Er ging iets mis. Probeer het opnieuw.",
+                ephemeral=True,
+            )
+
+            return
 
         responses = {
-            "JOINED": "Je doet mee! 🎉",
+            "JOINED": (
+                "Je doet mee aan de giveaway! 🎉"
+            ),
             "ALREADY_JOINED": (
                 "Je doet al mee aan deze giveaway."
             ),
-            "FULL": "Deze giveaway zit vol.",
-            "CLOSED": "Deze giveaway is al gesloten.",
-            "NOT_FOUND": "Deze giveaway bestaat niet.",
+            "FULL": (
+                "Deze giveaway zit vol."
+            ),
+            "CLOSED": (
+                "Deze giveaway is al gesloten."
+            ),
+            "NOT_FOUND": (
+                "Deze giveaway bestaat niet."
+            ),
         }
 
         await interaction.response.send_message(
@@ -139,6 +198,7 @@ class GiveawayView(discord.ui.View):
 # ============================================================
 
 class GiveawayBot(commands.Bot):
+
     def __init__(self):
         intents = discord.Intents.default()
 
@@ -164,7 +224,7 @@ class GiveawayBot(commands.Bot):
         self.shutdown_started = False
 
     # ========================================================
-    # VIEW
+    # GIVEAWAY VIEW
     # ========================================================
 
     def create_giveaway_view(
@@ -179,19 +239,28 @@ class GiveawayBot(commands.Bot):
         )
 
     # ========================================================
-    # SETUP
+    # SETUP HOOK
     # ========================================================
 
     async def setup_hook(self):
-        log.info("Database verbinden...")
+
+        log.info(
+            "Database verbinden..."
+        )
 
         await self.db.connect()
 
+        log.info(
+            "Database verbonden."
+        )
+
         await self.db.integrity_check()
 
-        log.info("Database OK.")
+        log.info(
+            "Database integrity check OK."
+        )
 
-        # Persistent Discord UI
+        # Persistente giveaway buttons
         self.add_view(
             self.create_giveaway_view()
         )
@@ -215,14 +284,33 @@ class GiveawayBot(commands.Bot):
     # ========================================================
 
     async def on_ready(self):
+
         if self.startup_complete:
             return
 
         self.startup_complete = True
 
         log.info(
-            "Ingelogd als %s",
+            "========================================"
+        )
+
+        log.info(
+            "Discord bot online: %s",
             self.user,
+        )
+
+        log.info(
+            "Bot ID: %s",
+            self.user.id if self.user else "unknown",
+        )
+
+        log.info(
+            "Servers: %s",
+            len(self.guilds),
+        )
+
+        log.info(
+            "========================================"
         )
 
         await self.startup_reconciliation()
@@ -238,17 +326,24 @@ class GiveawayBot(commands.Bot):
     # ========================================================
 
     async def startup_reconciliation(self):
-        cutoff = time.time() - 120
+
+        cutoff = (
+            time.time()
+            - 120
+        )
 
         # ----------------------------------------------------
-        # PROCESSING recovery
+        # Stale PROCESSING recovery
         # ----------------------------------------------------
 
-        processing = await self.db.stale_processing(
-            cutoff
+        processing = (
+            await self.db.stale_processing(
+                cutoff
+            )
         )
 
         for row in processing:
+
             message_id = int(
                 row["message_id"]
             )
@@ -261,6 +356,15 @@ class GiveawayBot(commands.Bot):
 
             if local_task is not None:
                 local_task.cancel()
+
+                try:
+                    await local_task
+                except (
+                    asyncio.CancelledError,
+                    Exception,
+                ):
+                    pass
+
                 continue
 
             await self.db.recover_processing(
@@ -270,7 +374,7 @@ class GiveawayBot(commands.Bot):
             )
 
         # ----------------------------------------------------
-        # RESULT lease recovery
+        # Stale result leases
         # ----------------------------------------------------
 
         result_leases = (
@@ -280,6 +384,7 @@ class GiveawayBot(commands.Bot):
         )
 
         for row in result_leases:
+
             await self.db.recover_result_lease(
                 int(row["message_id"]),
                 row["result_send_owner_token"],
@@ -299,7 +404,7 @@ class GiveawayBot(commands.Bot):
     )
     @app_commands.describe(
         prize="De prijs van de giveaway.",
-        minutes="Duur in minuten.",
+        minutes="Duur van de giveaway in minuten.",
         winners="Aantal winnaars.",
         max_participants="Maximum aantal deelnemers.",
     )
@@ -307,22 +412,39 @@ class GiveawayBot(commands.Bot):
         self,
         interaction: discord.Interaction,
         prize: str,
-        minutes: app_commands.Range[int, 1, 10080],
-        winners: app_commands.Range[int, 1, 50],
-        max_participants: app_commands.Range[int, 1, 100000],
+        minutes: app_commands.Range[
+            int,
+            1,
+            10080,
+        ],
+        winners: app_commands.Range[
+            int,
+            1,
+            50,
+        ],
+        max_participants: app_commands.Range[
+            int,
+            1,
+            100000,
+        ],
     ):
+
         if interaction.guild is None:
+
             await interaction.response.send_message(
                 "Dit kan alleen in een server.",
                 ephemeral=True,
             )
+
             return
 
         if interaction.channel is None:
+
             await interaction.response.send_message(
                 "Dit kanaal kan niet worden gebruikt.",
                 ephemeral=True,
             )
+
             return
 
         await interaction.response.defer(
@@ -333,16 +455,23 @@ class GiveawayBot(commands.Bot):
             "create"
         )
 
-        # Eindtijd slechts één keer berekenen.
+        # Eindtijd één keer bepalen.
         expires_at = (
             time.time()
-            + int(minutes) * 60
+            + (
+                int(minutes)
+                * 60
+            )
         )
 
         payload = {
             "prize": prize,
-            "winner_count": int(winners),
-            "max_participants": int(max_participants),
+            "winner_count": int(
+                winners
+            ),
+            "max_participants": int(
+                max_participants
+            ),
             "expires_at": expires_at,
         }
 
@@ -358,7 +487,7 @@ class GiveawayBot(commands.Bot):
         )
 
         # ====================================================
-        # DISCORD MESSAGE
+        # GIVEAWAY EMBED
         # ====================================================
 
         embed = discord.Embed(
@@ -368,19 +497,19 @@ class GiveawayBot(commands.Bot):
                 f"**Winnaars:** {winners}\n"
                 f"**Maximum deelnemers:** "
                 f"{max_participants}\n\n"
-                "Klik hieronder op **Meedoen**."
+                "Klik hieronder op "
+                "**🎉 Meedoen** om deel te nemen."
             ),
         )
 
         embed.set_footer(
             text=(
-                f"giveaway-create:"
+                "giveaway-create:"
                 f"{creation_token}"
             )
         )
 
         # Eerst disabled.
-        # Pas na succesvolle DB-opslag wordt de knop actief.
         message = await interaction.channel.send(
             embed=embed,
             view=self.create_giveaway_view(
@@ -400,6 +529,7 @@ class GiveawayBot(commands.Bot):
         )
 
         if not intent_saved:
+
             try:
                 await message.delete()
             except discord.HTTPException:
@@ -421,18 +551,25 @@ class GiveawayBot(commands.Bot):
         # DATABASE RECORD
         # ====================================================
 
-        created = await self.db.create_giveaway(
-            message_id=message.id,
-            guild_id=interaction.guild.id,
-            channel_id=interaction.channel.id,
-            prize=prize,
-            winner_count=int(winners),
-            max_participants=int(max_participants),
-            expires_at=expires_at,
-            creation_token=creation_token,
+        created = (
+            await self.db.create_giveaway(
+                message_id=message.id,
+                guild_id=interaction.guild.id,
+                channel_id=interaction.channel.id,
+                prize=prize,
+                winner_count=int(
+                    winners
+                ),
+                max_participants=int(
+                    max_participants
+                ),
+                expires_at=expires_at,
+                creation_token=creation_token,
+            )
         )
 
         if not created:
+
             await self.db.fail_intent(
                 creation_token,
                 "Could not create giveaway row.",
@@ -484,6 +621,7 @@ class GiveawayBot(commands.Bot):
     # ========================================================
 
     async def close(self):
+
         if self.shutdown_started:
             return
 
@@ -493,39 +631,89 @@ class GiveawayBot(commands.Bot):
             "Bot wordt afgesloten..."
         )
 
-        await self.worker.stop()
+        try:
+            await self.worker.stop()
+        except Exception:
+            log.exception(
+                "Fout tijdens stoppen worker."
+            )
 
-        await self.db.close()
+        try:
+            await self.db.close()
+        except Exception:
+            log.exception(
+                "Fout tijdens sluiten database."
+            )
 
         await super().close()
 
 
 # ============================================================
-# START
+# TOKEN CHECK
 # ============================================================
 
 if not TOKEN:
     raise RuntimeError(
-        "DISCORD_TOKEN ontbreekt in de environment variables."
+        "DISCORD_TOKEN ontbreekt in de Render Environment Variables."
     )
 
+
+# ============================================================
+# BOT INSTANCE
+# ============================================================
 
 bot = GiveawayBot()
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 async def main():
+
+    # Eerst HTTP server starten.
+    # Render moet direct een open poort kunnen zien.
     web_runner = await start_web_server()
 
     try:
-        await bot.start(TOKEN)
+
+        log.info(
+            "Discord bot wordt gestart..."
+        )
+
+        await bot.start(
+            TOKEN
+        )
+
+    except Exception:
+        log.exception(
+            "Discord bot is gestopt door een fout."
+        )
+
+        raise
 
     finally:
+
+        log.info(
+            "HTTP server wordt afgesloten..."
+        )
+
         await web_runner.cleanup()
 
 
+# ============================================================
+# RUN
+# ============================================================
+
 if __name__ == "__main__":
+
     try:
-        asyncio.run(main())
+        asyncio.run(
+            main()
+        )
 
     except KeyboardInterrupt:
-        pass
+
+        log.info(
+            "Bot handmatig gestopt."
+        )
