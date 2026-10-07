@@ -287,6 +287,8 @@ class Database:
         payload: dict,
     ):
         async with self.transaction() as db:
+            current_time = now()
+
             await db.execute(
                 """
                 INSERT OR IGNORE INTO
@@ -318,8 +320,8 @@ class Database:
                         payload,
                         separators=(",", ":"),
                     ),
-                    now(),
-                    now(),
+                    current_time,
+                    current_time,
                 ),
             )
 
@@ -641,6 +643,8 @@ class Database:
         processing_token: str,
     ) -> bool:
         async with self.transaction() as db:
+            current_time = now()
+
             cur = await db.execute(
                 """
                 UPDATE giveaway_system
@@ -659,9 +663,9 @@ class Database:
                 """,
                 (
                     processing_token,
-                    now(),
+                    current_time,
                     message_id,
-                    now(),
+                    current_time,
                 ),
             )
 
@@ -852,9 +856,7 @@ class Database:
                     if permanent
                     else "PROCESSING_RESULT",
                     retry_count,
-                    None
-                    if permanent
-                    else next_retry_at,
+                    None if permanent else next_retry_at,
                     error_code[:100],
                     str(error_message)[:1000],
                     message_id,
@@ -927,9 +929,7 @@ class Database:
             ) as cursor:
                 count = await cursor.fetchone()
 
-            if count["count"] >= giveaway[
-                "max_participants"
-            ]:
+            if count["count"] >= giveaway["max_participants"]:
                 return False, "FULL"
 
             await db.execute(
@@ -1051,9 +1051,9 @@ class Database:
         has_result: bool,
     ) -> bool:
         target = (
-            "PROCESSING_RESULT"
+            PROCESSING_RESULT
             if has_result
-            else "ACTIVE"
+            else ACTIVE
         )
 
         async with self.transaction() as db:
@@ -1075,7 +1075,7 @@ class Database:
                 (
                     target,
                     now()
-                    if target == "PROCESSING_RESULT"
+                    if target == PROCESSING_RESULT
                     else None,
                     message_id,
                     processing_token,
@@ -1135,13 +1135,3 @@ class Database:
             )
 
             return cur.rowcount == 1
-
-Vervang dus je huidige "database.py" volledig met bovenstaande versie.
-
-Daarna opnieuw deployen. De specifieke fout:
-
-"AttributeError: 'Connection' object has no attribute 'execute_fetchone'"
-
-zou hiermee weg moeten zijn. De "execute_fetchall()"-aanroepen zijn ook allemaal vervangen, zodat je niet direct tegen dezelfde fout met "execute_fetchall()" aanloopt.
-
-Als Render daarna een nieuwe foutmelding geeft, plak alleen die nieuwe foutmelding hier; dan pakken we die volgende aan.
