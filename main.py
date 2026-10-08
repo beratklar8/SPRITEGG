@@ -6,6 +6,7 @@ import random
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import aiosqlite
@@ -20,13 +21,22 @@ try:
 except Exception:
     Groq = None
 
+from database import DatabaseController
+
+
+# =========================================================
+# ENVIRONMENT / LOGGING
+# =========================================================
+
 load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+
 logger = logging.getLogger("giveaway-trust-bot")
+
 
 # =========================================================
 # CONFIG
@@ -36,24 +46,110 @@ TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 API_SECRET = os.getenv("API_SECRET", "").strip()
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "").strip()
-BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0") or 0)
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower().strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
-PORT = int(os.getenv("PORT", "10000") or 10000)
 
-if ENVIRONMENT in {"production", "render"} or os.getenv("RENDER"):
-    DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/bot_database.db")
-else:
-    DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_database.db")
+BOT_OWNER_ID = int(
+    os.getenv("BOT_OWNER_ID", "0") or 0
+)
+
+ENVIRONMENT = os.getenv(
+    "ENVIRONMENT",
+    "development",
+).lower().strip()
+
+GROQ_MODEL = os.getenv(
+    "GROQ_MODEL",
+    "llama-3.3-70b-versatile",
+).strip()
+
+PORT = int(
+    os.getenv("PORT", "10000") or 10000
+)
+
+
+# =========================================================
+# DATABASE PATH
+# =========================================================
+
+def get_database_path() -> str:
+    """
+    Use DATABASE_PATH when supplied and writable.
+    Otherwise use the current application directory.
+
+    This intentionally does NOT default to /data because
+    many Render services do not have a writable /data folder
+    unless a persistent disk is mounted there.
+    """
+
+    configured = os.getenv(
+        "DATABASE_PATH",
+        "",
+    ).strip()
+
+    if configured:
+        requested = Path(configured)
+
+        try:
+            requested.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            test_file = (
+                requested.parent
+                / ".db_write_test"
+            )
+
+            with open(
+                test_file,
+                "w",
+                encoding="utf-8",
+            ) as file:
+                file.write("ok")
+
+            try:
+                test_file.unlink()
+            except OSError:
+                pass
+
+            return str(requested)
+
+        except (PermissionError, OSError):
+            logger.warning(
+                "DATABASE_PATH '%s' is not writable. "
+                "Using local fallback database.",
+                configured,
+            )
+
+    fallback = (
+        Path.cwd()
+        / "bot_database.db"
+    )
+
+    return str(fallback)
+
+
+DATABASE_PATH = get_database_path()
+
+logger.info(
+    "Using database: %s",
+    DATABASE_PATH,
+)
+
+
+# =========================================================
+# ROLES
+# =========================================================
 
 ROLE_50_ID = 1529114068412141639
 ROLE_100_ID = 1529114203204489277
 
+
 # =========================================================
-# DISCORD
+# DISCORD INTENTS
 # =========================================================
 
 intents = discord.Intents.default()
+
 intents.guilds = True
 intents.members = True
 intents.message_content = True
@@ -64,32 +160,44 @@ intents.message_content = True
 # =========================================================
 
 def now_timestamp() -> int:
-    return int(time.time())
+    return int(
+        time.time()
+    )
 
 
-def clamp(value: int, low: int, high: int) -> int:
-    return max(low, min(high, value))
+def format_timestamp(
+    timestamp: int | float | None,
+) -> str:
 
-
-def format_timestamp(ts: int | float | None) -> str:
-    if not ts:
+    if not timestamp:
         return "Unknown"
 
     return datetime.fromtimestamp(
-        float(ts),
+        float(timestamp),
         tz=timezone.utc,
-    ).strftime("%Y-%m-%d %H:%M UTC")
+    ).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
 
 
-def parse_duration(value: str) -> Optional[int]:
-    """
-    Examples:
-    10s
-    30m
-    2h
-    3d
-    1w
-    """
+def clamp(
+    value: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+
+    return max(
+        minimum,
+        min(
+            maximum,
+            value,
+        ),
+    )
+
+
+def parse_duration(
+    value: str,
+) -> Optional[int]:
 
     match = re.fullmatch(
         r"\s*(\d+)\s*([smhdw])\s*",
@@ -99,7 +207,10 @@ def parse_duration(value: str) -> Optional[int]:
     if not match:
         return None
 
-    amount = int(match.group(1))
+    amount = int(
+        match.group(1)
+    )
+
     unit = match.group(2)
 
     multipliers = {
@@ -110,26 +221,39 @@ def parse_duration(value: str) -> Optional[int]:
         "w": 604800,
     }
 
-    seconds = amount * multipliers[unit]
+    seconds = (
+        amount
+        * multipliers[unit]
+    )
 
     if seconds <= 0:
         return None
 
-    # Max 30 days
-    if seconds > 60 * 60 * 24 * 30:
+    if seconds > (
+        30
+        * 24
+        * 60
+        * 60
+    ):
         return None
 
     return seconds
 
 
 def owner_only():
-    async def predicate(interaction: discord.Interaction) -> bool:
+    async def predicate(
+        interaction: discord.Interaction,
+    ) -> bool:
+
         return (
             BOT_OWNER_ID > 0
-            and interaction.user.id == BOT_OWNER_ID
+            and interaction.user.id
+            == BOT_OWNER_ID
         )
 
-    return app_commands.check(predicate)
+    return app_commands.check(
+        predicate
+    )
 
 
 async def safe_interaction_error(
@@ -137,470 +261,48 @@ async def safe_interaction_error(
     message: str,
 ):
     """
-    Safely answers an interaction even if something already acknowledged it.
+    Safely answer an interaction even when it
+    has already been acknowledged.
     """
 
     try:
+
         if interaction.response.is_done():
+
             await interaction.followup.send(
                 message,
                 ephemeral=True,
             )
+
         else:
+
             await interaction.response.send_message(
                 message,
                 ephemeral=True,
             )
+
     except Exception:
-        logger.exception("Could not send interaction error")
+
+        logger.exception(
+            "Could not send interaction error"
+        )
 
 
 # =========================================================
-# DATABASE
-# =========================================================
-
-class DatabaseController:
-    def __init__(self, path: str):
-        self.path = path
-        self.db: Optional[aiosqlite.Connection] = None
-        self._lock = asyncio.Lock()
-
-    async def init(self):
-        folder = os.path.dirname(
-            os.path.abspath(self.path)
-        )
-
-        os.makedirs(folder, exist_ok=True)
-
-        self.db = await aiosqlite.connect(self.path)
-        self.db.row_factory = aiosqlite.Row
-
-        await self.db.execute("PRAGMA journal_mode=WAL")
-        await self.db.execute("PRAGMA foreign_keys=ON")
-
-        await self.db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS trust_users (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                trust INTEGER NOT NULL DEFAULT 25,
-                vouches_given INTEGER NOT NULL DEFAULT 0,
-                vouches_received INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (guild_id, user_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS user_vouch_network (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                total_positive INTEGER NOT NULL DEFAULT 0,
-                total_negative INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS vouch_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                target_id INTEGER NOT NULL,
-                giver_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                reason TEXT NOT NULL DEFAULT '',
-                created_at INTEGER NOT NULL,
-                UNIQUE (guild_id, target_id, giver_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS transaction_log_config (
-                guild_id INTEGER PRIMARY KEY,
-                channel_id INTEGER NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1
-            );
-
-            CREATE TABLE IF NOT EXISTS temporary_bans (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                unban_at INTEGER NOT NULL,
-                reason TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (guild_id, user_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS giveaway_system (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL UNIQUE,
-                prize TEXT NOT NULL,
-                winners INTEGER NOT NULL,
-                end_at INTEGER NOT NULL,
-                host_id INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'ACTIVE',
-                created_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS giveaway_participants (
-                giveaway_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                joined_at INTEGER NOT NULL,
-                PRIMARY KEY (giveaway_id, user_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS giveaway_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                giveaway_id INTEGER NOT NULL,
-                guild_id INTEGER NOT NULL,
-                winner_ids TEXT NOT NULL DEFAULT '[]',
-                participant_count INTEGER NOT NULL DEFAULT 0,
-                ended_at INTEGER NOT NULL,
-                prize TEXT NOT NULL DEFAULT ''
-            );
-
-            CREATE TABLE IF NOT EXISTS user_activity (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                messages INTEGER NOT NULL DEFAULT 0,
-                commands INTEGER NOT NULL DEFAULT 0,
-                last_active INTEGER,
-                PRIMARY KEY (guild_id, user_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_trust_leaderboard
-            ON trust_users(guild_id, trust DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_giveaway_status
-            ON giveaway_system(status, end_at);
-
-            CREATE INDEX IF NOT EXISTS idx_tempban_expiry
-            ON temporary_bans(unban_at);
-            """
-        )
-
-        await self.db.commit()
-
-    def require_db(self):
-        if self.db is None:
-            raise RuntimeError(
-                "Database is not initialized"
-            )
-
-        return self.db
-
-    async def close(self):
-        if self.db is not None:
-            await self.db.close()
-            self.db = None
-
-    async def execute(
-        self,
-        query: str,
-        params: tuple = (),
-    ):
-        async with self._lock:
-            db = self.require_db()
-
-            cursor = await db.execute(
-                query,
-                params,
-            )
-
-            await db.commit()
-
-            return cursor
-
-    async def fetchone(
-        self,
-        query: str,
-        params: tuple = (),
-    ):
-        async with self._lock:
-            db = self.require_db()
-
-            cursor = await db.execute(
-                query,
-                params,
-            )
-
-            return await cursor.fetchone()
-
-    async def fetchall(
-        self,
-        query: str,
-        params: tuple = (),
-    ):
-        async with self._lock:
-            db = self.require_db()
-
-            cursor = await db.execute(
-                query,
-                params,
-            )
-
-            return await cursor.fetchall()
-
-    async def ensure_trust_user(
-        self,
-        guild_id: int,
-        user_id: int,
-    ):
-        ts = now_timestamp()
-
-        await self.execute(
-            """
-            INSERT INTO trust_users (
-                guild_id,
-                user_id,
-                trust,
-                created_at,
-                updated_at
-            )
-            VALUES (?, ?, 25, ?, ?)
-            ON CONFLICT(guild_id, user_id)
-            DO NOTHING
-            """,
-            (
-                guild_id,
-                user_id,
-                ts,
-                ts,
-            ),
-        )
-
-        await self.execute(
-            """
-            INSERT INTO user_vouch_network (
-                guild_id,
-                user_id
-            )
-            VALUES (?, ?)
-            ON CONFLICT(guild_id, user_id)
-            DO NOTHING
-            """,
-            (
-                guild_id,
-                user_id,
-            ),
-        )
-
-    async def get_trust_user(
-        self,
-        guild_id: int,
-        user_id: int,
-    ):
-        await self.ensure_trust_user(
-            guild_id,
-            user_id,
-        )
-
-        return await self.fetchone(
-            """
-            SELECT *
-            FROM trust_users
-            WHERE guild_id = ?
-              AND user_id = ?
-            """,
-            (
-                guild_id,
-                user_id,
-            ),
-        )
-
-    async def record_vouch(
-        self,
-        guild_id: int,
-        target_id: int,
-        giver_id: int,
-        amount: int,
-        reason: str,
-    ) -> bool:
-
-        async with self._lock:
-            db = self.require_db()
-
-            await db.execute("BEGIN")
-
-            try:
-                ts = now_timestamp()
-
-                # Ensure target
-                await db.execute(
-                    """
-                    INSERT INTO trust_users (
-                        guild_id,
-                        user_id,
-                        trust,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (?, ?, 25, ?, ?)
-                    ON CONFLICT(guild_id, user_id)
-                    DO NOTHING
-                    """,
-                    (
-                        guild_id,
-                        target_id,
-                        ts,
-                        ts,
-                    ),
-                )
-
-                # Ensure giver
-                await db.execute(
-                    """
-                    INSERT INTO trust_users (
-                        guild_id,
-                        user_id,
-                        trust,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (?, ?, 25, ?, ?)
-                    ON CONFLICT(guild_id, user_id)
-                    DO NOTHING
-                    """,
-                    (
-                        guild_id,
-                        giver_id,
-                        ts,
-                        ts,
-                    ),
-                )
-
-                cursor = await db.execute(
-                    """
-                    INSERT OR IGNORE INTO vouch_history (
-                        guild_id,
-                        target_id,
-                        giver_id,
-                        amount,
-                        reason,
-                        created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        guild_id,
-                        target_id,
-                        giver_id,
-                        amount,
-                        reason[:200],
-                        ts,
-                    ),
-                )
-
-                if cursor.rowcount == 0:
-                    await db.rollback()
-                    return False
-
-                target_cursor = await db.execute(
-                    """
-                    SELECT trust
-                    FROM trust_users
-                    WHERE guild_id = ?
-                      AND user_id = ?
-                    """,
-                    (
-                        guild_id,
-                        target_id,
-                    ),
-                )
-
-                target_row = await target_cursor.fetchone()
-
-                current_trust = (
-                    int(target_row["trust"])
-                    if target_row
-                    else 25
-                )
-
-                new_trust = clamp(
-                    current_trust + amount,
-                    0,
-                    100,
-                )
-
-                await db.execute(
-                    """
-                    UPDATE trust_users
-                    SET
-                        trust = ?,
-                        vouches_received =
-                            vouches_received + 1,
-                        updated_at = ?
-                    WHERE guild_id = ?
-                      AND user_id = ?
-                    """,
-                    (
-                        new_trust,
-                        ts,
-                        guild_id,
-                        target_id,
-                    ),
-                )
-
-                await db.execute(
-                    """
-                    UPDATE trust_users
-                    SET
-                        vouches_given =
-                            vouches_given + 1,
-                        updated_at = ?
-                    WHERE guild_id = ?
-                      AND user_id = ?
-                    """,
-                    (
-                        ts,
-                        guild_id,
-                        giver_id,
-                    ),
-                )
-
-                await db.execute(
-                    """
-                    INSERT INTO user_vouch_network (
-                        guild_id,
-                        user_id,
-                        total_positive,
-                        total_negative
-                    )
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(guild_id, user_id)
-                    DO UPDATE SET
-                        total_positive =
-                            user_vouch_network.total_positive
-                            + excluded.total_positive,
-                        total_negative =
-                            user_vouch_network.total_negative
-                            + excluded.total_negative
-                    """,
-                    (
-                        guild_id,
-                        target_id,
-                        1 if amount > 0 else 0,
-                        1 if amount < 0 else 0,
-                    ),
-                )
-
-                await db.commit()
-
-                return True
-
-            except Exception:
-                await db.rollback()
-                raise
-
-
-# =========================================================
-# UI BASE ERROR HANDLER
+# SAFE VIEW
 # =========================================================
 
 class SafeView(discord.ui.View):
+
     async def on_error(
         self,
         interaction: discord.Interaction,
         error: Exception,
         item: discord.ui.Item,
     ):
+
         logger.exception(
-            "View interaction failed",
+            "Discord UI error",
             exc_info=(
                 type(error),
                 error,
@@ -610,18 +312,24 @@ class SafeView(discord.ui.View):
 
         await safe_interaction_error(
             interaction,
-            "Something went wrong while processing that button.",
+            "Something went wrong while processing that interaction.",
         )
 
 
+# =========================================================
+# SAFE MODAL
+# =========================================================
+
 class SafeModal(discord.ui.Modal):
+
     async def on_error(
         self,
         interaction: discord.Interaction,
         error: Exception,
     ):
+
         logger.exception(
-            "Modal interaction failed",
+            "Discord modal error",
             exc_info=(
                 type(error),
                 error,
@@ -639,29 +347,43 @@ class SafeModal(discord.ui.Modal):
 # BOT
 # =========================================================
 
-class GiveawayTrustBot(discord.Client):
+class GiveawayTrustBot(
+    discord.Client
+):
 
     def __init__(self):
+
         super().__init__(
             intents=intents
         )
 
-        self.tree = app_commands.CommandTree(
-            self
+        self.tree = (
+            app_commands.CommandTree(
+                self
+            )
         )
 
-        self.db = DatabaseController(
-            DATABASE_PATH
+        self.db = (
+            DatabaseController(
+                DATABASE_PATH
+            )
         )
 
         self.groq = None
 
-        if GROQ_API_KEY and Groq is not None:
+        if (
+            GROQ_API_KEY
+            and Groq is not None
+        ):
+
             try:
+
                 self.groq = Groq(
                     api_key=GROQ_API_KEY
                 )
+
             except Exception:
+
                 logger.exception(
                     "Could not initialize Groq"
                 )
@@ -670,48 +392,62 @@ class GiveawayTrustBot(discord.Client):
         self.health_site = None
 
     # =====================================================
-    # SETUP
+    # SETUP HOOK
     # =====================================================
 
-    async def setup_hook(self):
+    async def setup_hook(
+        self,
+    ):
+
+        logger.info(
+            "Initializing database..."
+        )
 
         await self.db.init()
+
+        logger.info(
+            "Database initialized."
+        )
 
         # Persistent trust panel
         self.add_view(
             TrustPanelView(self)
         )
 
-        # Loops
+        # Recover active giveaways
+        await self.recover_giveaways()
+
+        # Start background loops
         self.giveaway_loop.start()
         self.temp_ban_loop.start()
         self.activity_loop.start()
 
-        # Recover giveaway buttons
-        await self.recover_giveaways()
-
-        # Render health server
+        # Health server
         await self.start_health_server()
 
-        # Sync application commands
+        # Sync commands
         try:
+
             synced = await self.tree.sync()
 
             logger.info(
-                "Synced %s application commands",
+                "Synced %s application command(s).",
                 len(synced),
             )
 
         except Exception:
+
             logger.exception(
-                "Command sync failed"
+                "Application command sync failed"
             )
 
     # =====================================================
     # READY
     # =====================================================
 
-    async def on_ready(self):
+    async def on_ready(
+        self,
+    ):
 
         logger.info(
             "Logged in as %s",
@@ -721,17 +457,22 @@ class GiveawayTrustBot(discord.Client):
         for guild in self.guilds:
 
             try:
+
                 for member in guild.members:
 
-                    if not member.bot:
-                        await self.db.ensure_trust_user(
-                            guild.id,
-                            member.id,
-                        )
+                    if member.bot:
+                        continue
+
+                    await self.db.ensure_trust_user(
+                        guild.id,
+                        member.id,
+                    )
 
             except Exception:
+
                 logger.exception(
-                    "Trust initialization failed for guild %s",
+                    "Could not initialize trust users "
+                    "for guild %s",
                     guild.id,
                 )
 
@@ -739,7 +480,9 @@ class GiveawayTrustBot(discord.Client):
     # CLOSE
     # =====================================================
 
-    async def close(self):
+    async def close(
+        self,
+    ):
 
         loops = (
             self.giveaway_loop,
@@ -748,8 +491,14 @@ class GiveawayTrustBot(discord.Client):
         )
 
         for loop in loops:
-            if loop.is_running():
-                loop.cancel()
+
+            try:
+
+                if loop.is_running():
+                    loop.cancel()
+
+            except Exception:
+                pass
 
         if self.health_runner:
 
@@ -758,15 +507,25 @@ class GiveawayTrustBot(discord.Client):
             except Exception:
                 pass
 
-        await self.db.close()
+            self.health_runner = None
+            self.health_site = None
+
+        try:
+            await self.db.close()
+        except Exception:
+            logger.exception(
+                "Could not close database"
+            )
 
         await super().close()
 
     # =====================================================
-    # HEALTH
+    # HEALTH SERVER
     # =====================================================
 
-    async def start_health_server(self):
+    async def start_health_server(
+        self,
+    ):
 
         if self.health_runner is not None:
             return
@@ -788,8 +547,8 @@ class GiveawayTrustBot(discord.Client):
             self.health_root,
         )
 
-        self.health_runner = web.AppRunner(
-            app
+        self.health_runner = (
+            web.AppRunner(app)
         )
 
         await self.health_runner.setup()
@@ -803,7 +562,7 @@ class GiveawayTrustBot(discord.Client):
         await self.health_site.start()
 
         logger.info(
-            "Health server started on port %s",
+            "Health server running on port %s",
             PORT,
         )
 
@@ -811,6 +570,7 @@ class GiveawayTrustBot(discord.Client):
         self,
         request: web.Request,
     ):
+
         return web.json_response(
             {
                 "ok": True,
@@ -839,7 +599,7 @@ class GiveawayTrustBot(discord.Client):
         command: bool = False,
     ):
 
-        ts = now_timestamp()
+        timestamp = now_timestamp()
 
         await self.db.execute(
             """
@@ -867,12 +627,12 @@ class GiveawayTrustBot(discord.Client):
                 user_id,
                 int(message),
                 int(command),
-                ts,
+                timestamp,
             ),
         )
 
     # =====================================================
-    # MEMBER
+    # MEMBER RESOLVER
     # =====================================================
 
     async def resolve_member(
@@ -885,19 +645,17 @@ class GiveawayTrustBot(discord.Client):
 
         # Mention
         if raw.startswith("<@"):
-            raw = raw.replace(
-                "<@",
-                "",
-            ).replace(
-                "!",
-                "",
-            ).replace(
-                ">",
-                "",
+
+            raw = (
+                raw
+                .replace("<@", "")
+                .replace("!", "")
+                .replace(">", "")
             )
 
         # ID
         try:
+
             user_id = int(raw)
 
             member = guild.get_member(
@@ -908,16 +666,19 @@ class GiveawayTrustBot(discord.Client):
                 return member
 
             try:
+
                 return await guild.fetch_member(
                     user_id
                 )
+
             except discord.HTTPException:
+
                 return None
 
         except ValueError:
             pass
 
-        # Name
+        # Username/display name
         lowered = raw.lower()
 
         for member in guild.members:
@@ -932,9 +693,14 @@ class GiveawayTrustBot(discord.Client):
                 member.display_name.lower()
                 == lowered
             ):
+
                 return member
 
         return None
+
+    # =====================================================
+    # TRUST ROLES
+    # =====================================================
 
     async def update_trust_roles(
         self,
@@ -955,11 +721,14 @@ class GiveawayTrustBot(discord.Client):
             if role50:
 
                 if trust >= 50:
+
                     await member.add_roles(
                         role50,
                         reason="Trust reached 50",
                     )
+
                 else:
+
                     await member.remove_roles(
                         role50,
                         reason="Trust below 50",
@@ -968,24 +737,29 @@ class GiveawayTrustBot(discord.Client):
             if role100:
 
                 if trust >= 100:
+
                     await member.add_roles(
                         role100,
                         reason="Trust reached 100",
                     )
+
                 else:
+
                     await member.remove_roles(
                         role100,
                         reason="Trust below 100",
                     )
 
         except discord.HTTPException:
+
             logger.exception(
-                "Role update failed for %s",
+                "Could not update trust roles "
+                "for member %s",
                 member.id,
             )
 
     # =====================================================
-    # PROFILE
+    # TRUST PROFILE
     # =====================================================
 
     async def build_profile_embed(
@@ -1067,48 +841,57 @@ class GiveawayTrustBot(discord.Client):
         guild = interaction.guild
 
         if guild is None:
+
             return await interaction.response.send_message(
                 "This can only be used in a server.",
                 ephemeral=True,
             )
 
         if target.bot:
+
             return await interaction.response.send_message(
                 "You cannot vouch a bot.",
                 ephemeral=True,
             )
 
-        if target.id == interaction.user.id:
+        if (
+            target.id
+            == interaction.user.id
+        ):
+
             return await interaction.response.send_message(
                 "You cannot vouch yourself.",
                 ephemeral=True,
             )
 
-        if amount > 0:
-            amount = 5
-        else:
-            amount = -5
+        amount = (
+            5
+            if amount > 0
+            else -5
+        )
 
         # IMPORTANT:
-        # acknowledge interaction immediately
+        # Answer the Discord interaction immediately.
         await interaction.response.defer(
             ephemeral=True
         )
 
         try:
 
-            created = await self.db.record_vouch(
-                guild.id,
-                target.id,
-                interaction.user.id,
-                amount,
-                reason,
+            created = (
+                await self.db.record_vouch(
+                    guild.id,
+                    target.id,
+                    interaction.user.id,
+                    amount,
+                    reason,
+                )
             )
 
         except Exception:
 
             logger.exception(
-                "Vouch DB error"
+                "Vouch database error"
             )
 
             return await interaction.followup.send(
@@ -1124,64 +907,83 @@ class GiveawayTrustBot(discord.Client):
                 ephemeral=True,
             )
 
-        row = await self.db.get_trust_user(
-            guild.id,
-            target.id,
-        )
+        try:
 
-        trust = int(
-            row["trust"]
-            if row
-            else 25
-        )
+            row = await self.db.get_trust_user(
+                guild.id,
+                target.id,
+            )
 
-        await self.update_trust_roles(
-            target,
-            trust,
-        )
+            trust = int(
+                row["trust"]
+                if row
+                else 25
+            )
 
-        direction = (
-            "+Vouch"
-            if amount > 0
-            else "-Vouch"
-        )
+            await self.update_trust_roles(
+                target,
+                trust,
+            )
 
-        embed = discord.Embed(
-            title=f"{direction} recorded",
-            description=(
-                f"{target.mention} now has "
-                f"**{trust}/100 Trust**."
-            ),
-            timestamp=datetime.now(
-                timezone.utc
-            ),
-        )
+            direction = (
+                "+Vouch"
+                if amount > 0
+                else "-Vouch"
+            )
 
-        embed.add_field(
-            name="Given by",
-            value=interaction.user.mention,
-        )
+            embed = discord.Embed(
+                title=f"{direction} recorded",
+                description=(
+                    f"{target.mention} now has "
+                    f"**{trust}/100 Trust**."
+                ),
+                timestamp=datetime.now(
+                    timezone.utc
+                ),
+            )
 
-        embed.add_field(
-            name="Reason",
-            value=(
-                reason[:200]
-                if reason
-                else "No reason provided"
-            ),
-            inline=False,
-        )
+            embed.add_field(
+                name="Given by",
+                value=interaction.user.mention,
+            )
 
-        # Respond BEFORE transaction logging
-        await interaction.followup.send(
-            embed=embed,
-            ephemeral=True,
-        )
+            embed.add_field(
+                name="Reason",
+                value=(
+                    reason[:200]
+                    if reason
+                    else "No reason provided"
+                ),
+                inline=False,
+            )
 
-        await self.send_transaction_log(
-            guild,
-            embed,
-        )
+            # Tell the user first.
+            await interaction.followup.send(
+                embed=embed,
+                ephemeral=True,
+            )
+
+            # Then write log.
+            await self.send_transaction_log(
+                guild,
+                embed,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Vouch processing failed"
+            )
+
+            await safe_interaction_error(
+                interaction,
+                "The vouch was saved, but something went wrong "
+                "while finishing the operation.",
+            )
+
+    # =====================================================
+    # TRANSACTION LOG
+    # =====================================================
 
     async def send_transaction_log(
         self,
@@ -1213,10 +1015,15 @@ class GiveawayTrustBot(discord.Client):
             if channel is None:
 
                 try:
-                    channel = await self.fetch_channel(
-                        row["channel_id"]
+
+                    channel = (
+                        await self.fetch_channel(
+                            row["channel_id"]
+                        )
                     )
+
                 except discord.HTTPException:
+
                     return
 
             await channel.send(
@@ -1224,12 +1031,13 @@ class GiveawayTrustBot(discord.Client):
             )
 
         except Exception:
+
             logger.exception(
                 "Transaction log failed"
             )
 
     # =====================================================
-    # GIVEAWAY
+    # GIVEAWAY CREATE
     # =====================================================
 
     async def create_giveaway_record(
@@ -1274,7 +1082,13 @@ class GiveawayTrustBot(discord.Client):
             cursor.lastrowid
         )
 
-    async def recover_giveaways(self):
+    # =====================================================
+    # RECOVER GIVEAWAYS
+    # =====================================================
+
+    async def recover_giveaways(
+        self,
+    ):
 
         rows = await self.db.fetchall(
             """
@@ -1299,10 +1113,15 @@ class GiveawayTrustBot(discord.Client):
                 )
 
             except Exception:
+
                 logger.exception(
                     "Could not recover giveaway %s",
                     row["id"],
                 )
+
+    # =====================================================
+    # FINISH GIVEAWAY
+    # =====================================================
 
     async def finish_giveaway(
         self,
@@ -1310,7 +1129,7 @@ class GiveawayTrustBot(discord.Client):
         forced: bool = False,
     ) -> bool:
 
-        # Claim giveaway
+        # Prevent two loop runs / manual end at once.
         async with self.db._lock:
 
             db = self.db.require_db()
@@ -1334,7 +1153,9 @@ class GiveawayTrustBot(discord.Client):
                 row = await cursor.fetchone()
 
                 if row is None:
+
                     await db.rollback()
+
                     return False
 
                 await db.execute(
@@ -1349,25 +1170,30 @@ class GiveawayTrustBot(discord.Client):
                 await db.commit()
 
             except Exception:
+
                 await db.rollback()
+
                 raise
 
         try:
 
-            participants = await self.db.fetchall(
-                """
-                SELECT user_id
-                FROM giveaway_participants
-                WHERE giveaway_id = ?
-                """,
-                (giveaway_id,),
+            participants = (
+                await self.db.fetchall(
+                    """
+                    SELECT user_id
+                    FROM giveaway_participants
+                    WHERE giveaway_id = ?
+                    """,
+                    (giveaway_id,),
+                )
             )
 
             user_ids = [
                 int(
                     participant["user_id"]
                 )
-                for participant in participants
+                for participant
+                in participants
             ]
 
             winner_count = min(
@@ -1375,30 +1201,36 @@ class GiveawayTrustBot(discord.Client):
                 len(user_ids),
             )
 
-            winners = (
-                random.sample(
+            if winner_count:
+
+                winners = random.sample(
                     user_ids,
                     winner_count,
                 )
-                if winner_count
-                else []
-            )
+
+            else:
+
+                winners = []
 
             winner_mentions = [
                 f"<@{user_id}>"
                 for user_id in winners
             ]
 
-            winner_text = (
-                ", ".join(
-                    winner_mentions
+            if winner_mentions:
+
+                winner_text = (
+                    ", ".join(
+                        winner_mentions
+                    )
                 )
-                if winner_mentions
-                else (
+
+            else:
+
+                winner_text = (
                     "No winner — "
                     "not enough participants."
                 )
-            )
 
             embed = discord.Embed(
                 title="🎉 Giveaway Ended",
@@ -1416,12 +1248,12 @@ class GiveawayTrustBot(discord.Client):
             )
 
             guild = self.get_guild(
-                row["guild_id"]
+                int(row["guild_id"])
             )
 
             channel = (
                 guild.get_channel(
-                    row["channel_id"]
+                    int(row["channel_id"])
                 )
                 if guild
                 else None
@@ -1431,8 +1263,12 @@ class GiveawayTrustBot(discord.Client):
 
                 try:
 
-                    message = await channel.fetch_message(
-                        row["message_id"]
+                    message = (
+                        await channel.fetch_message(
+                            int(
+                                row["message_id"]
+                            )
+                        )
                     )
 
                     await message.edit(
@@ -1443,9 +1279,11 @@ class GiveawayTrustBot(discord.Client):
                 except discord.HTTPException:
 
                     try:
+
                         await channel.send(
                             embed=embed
                         )
+
                     except discord.HTTPException:
                         pass
 
@@ -1454,8 +1292,10 @@ class GiveawayTrustBot(discord.Client):
                     try:
 
                         await channel.send(
-                            f"🎉 Giveaway winner(s): "
-                            f"{winner_text}"
+                            (
+                                "🎉 Giveaway winner(s): "
+                                f"{winner_text}"
+                            )
                         )
 
                     except discord.HTTPException:
@@ -1484,7 +1324,7 @@ class GiveawayTrustBot(discord.Client):
                 """,
                 (
                     giveaway_id,
-                    row["guild_id"],
+                    int(row["guild_id"]),
                     json.dumps(winners),
                     len(user_ids),
                     now_timestamp(),
@@ -1497,17 +1337,25 @@ class GiveawayTrustBot(discord.Client):
         except Exception:
 
             logger.exception(
-                "Giveaway finish failed"
+                "Giveaway finishing failed"
             )
 
-            await self.db.execute(
-                """
-                UPDATE giveaway_system
-                SET status = 'ACTIVE'
-                WHERE id = ?
-                """,
-                (giveaway_id,),
-            )
+            try:
+
+                await self.db.execute(
+                    """
+                    UPDATE giveaway_system
+                    SET status = 'ACTIVE'
+                    WHERE id = ?
+                    """,
+                    (giveaway_id,),
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Could not restore giveaway status"
+                )
 
             return False
 
@@ -1516,7 +1364,9 @@ class GiveawayTrustBot(discord.Client):
     # =====================================================
 
     @tasks.loop(seconds=15)
-    async def temp_ban_loop(self):
+    async def temp_ban_loop(
+        self,
+    ):
 
         try:
 
@@ -1532,18 +1382,24 @@ class GiveawayTrustBot(discord.Client):
             for row in rows:
 
                 guild = self.get_guild(
-                    row["guild_id"]
+                    int(row["guild_id"])
                 )
 
                 if guild:
 
                     try:
+
                         await guild.unban(
                             discord.Object(
-                                id=row["user_id"]
+                                id=int(
+                                    row["user_id"]
+                                )
                             ),
-                            reason="Temporary ban expired",
+                            reason=(
+                                "Temporary ban expired"
+                            ),
                         )
+
                     except discord.HTTPException:
                         pass
 
@@ -1560,12 +1416,16 @@ class GiveawayTrustBot(discord.Client):
                 )
 
         except Exception:
+
             logger.exception(
                 "Temporary ban loop failed"
             )
 
     @temp_ban_loop.before_loop
-    async def before_temp_ban_loop(self):
+    async def before_temp_ban_loop(
+        self,
+    ):
+
         await self.wait_until_ready()
 
     # =====================================================
@@ -1573,7 +1433,9 @@ class GiveawayTrustBot(discord.Client):
     # =====================================================
 
     @tasks.loop(seconds=5)
-    async def giveaway_loop(self):
+    async def giveaway_loop(
+        self,
+    ):
 
         try:
 
@@ -1595,12 +1457,16 @@ class GiveawayTrustBot(discord.Client):
                 )
 
         except Exception:
+
             logger.exception(
                 "Giveaway loop failed"
             )
 
     @giveaway_loop.before_loop
-    async def before_giveaway_loop(self):
+    async def before_giveaway_loop(
+        self,
+    ):
+
         await self.wait_until_ready()
 
     # =====================================================
@@ -1608,11 +1474,17 @@ class GiveawayTrustBot(discord.Client):
     # =====================================================
 
     @tasks.loop(seconds=60)
-    async def activity_loop(self):
+    async def activity_loop(
+        self,
+    ):
+
         return
 
     @activity_loop.before_loop
-    async def before_activity_loop(self):
+    async def before_activity_loop(
+        self,
+    ):
+
         await self.wait_until_ready()
 
     # =====================================================
@@ -1666,13 +1538,15 @@ class GiveawayTrustBot(discord.Client):
             )
 
         except Exception:
+
             logger.exception(
                 "Groq request failed"
             )
+
             return None
 
     # =====================================================
-    # EVENTS
+    # MEMBER JOIN
     # =====================================================
 
     async def on_member_join(
@@ -1688,9 +1562,14 @@ class GiveawayTrustBot(discord.Client):
             )
 
         except Exception:
+
             logger.exception(
-                "Member trust initialization failed"
+                "Could not initialize trust user"
             )
+
+    # =====================================================
+    # MESSAGE
+    # =====================================================
 
     async def on_message(
         self,
@@ -1711,11 +1590,15 @@ class GiveawayTrustBot(discord.Client):
                 )
 
             except Exception:
+
                 logger.exception(
-                    "Activity recording failed"
+                    "Could not record message activity"
                 )
 
-        if self.user and self.user in message.mentions:
+        if (
+            self.user
+            and self.user in message.mentions
+        ):
 
             clean = (
                 message.content
@@ -1732,8 +1615,10 @@ class GiveawayTrustBot(discord.Client):
 
             if clean:
 
-                answer = await self.ask_ai(
-                    clean
+                answer = (
+                    await self.ask_ai(
+                        clean
+                    )
                 )
 
                 if answer:
@@ -1748,30 +1633,28 @@ class GiveawayTrustBot(discord.Client):
                     except discord.HTTPException:
                         pass
 
-        try:
-            await self.process_commands(
-                message
-            )
-        except Exception:
-            pass
-
 
 # =========================================================
 # TRUST PANEL
 # =========================================================
 
-class TrustPanelView(SafeView):
+class TrustPanelView(
+    SafeView
+):
 
     def __init__(
         self,
         bot: GiveawayTrustBot,
     ):
+
         super().__init__(
             timeout=None
         )
 
         self.bot = bot
 
+    # -----------------------------------------------------
+    # CHECK MY VOUCH
     # -----------------------------------------------------
 
     @discord.ui.button(
@@ -1818,9 +1701,11 @@ class TrustPanelView(SafeView):
                     ephemeral=True,
                 )
 
-        embed = await self.bot.build_profile_embed(
-            interaction.guild,
-            member,
+        embed = (
+            await self.bot.build_profile_embed(
+                interaction.guild,
+                member,
+            )
         )
 
         await interaction.followup.send(
@@ -1828,6 +1713,8 @@ class TrustPanelView(SafeView):
             ephemeral=True,
         )
 
+    # -----------------------------------------------------
+    # CHECK USER
     # -----------------------------------------------------
 
     @discord.ui.button(
@@ -1857,6 +1744,8 @@ class TrustPanelView(SafeView):
         )
 
     # -----------------------------------------------------
+    # VOUCH USER
+    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Vouch A User",
@@ -1885,6 +1774,8 @@ class TrustPanelView(SafeView):
         )
 
     # -----------------------------------------------------
+    # REWARDS
+    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Vouch Rewards",
@@ -1912,6 +1803,8 @@ class TrustPanelView(SafeView):
             ephemeral=True,
         )
 
+    # -----------------------------------------------------
+    # LEADERBOARD
     # -----------------------------------------------------
 
     @discord.ui.button(
@@ -1952,15 +1845,18 @@ class TrustPanelView(SafeView):
 
 
 # =========================================================
-# CHECK MEMBER
+# CHECK MEMBER VIEW
 # =========================================================
 
-class CheckMemberView(SafeView):
+class CheckMemberView(
+    SafeView
+):
 
     def __init__(
         self,
         bot: GiveawayTrustBot,
     ):
+
         super().__init__(
             timeout=120
         )
@@ -1968,11 +1864,14 @@ class CheckMemberView(SafeView):
         self.bot = bot
 
         # IMPORTANT:
-        # NO @discord.ui.UserSelect decorator
-        self.user_select = discord.ui.UserSelect(
-            placeholder="Select a user",
-            min_values=1,
-            max_values=1,
+        # UserSelect is created normally.
+        # No @discord.ui.UserSelect decorator.
+        self.user_select = (
+            discord.ui.UserSelect(
+                placeholder="Select a user",
+                min_values=1,
+                max_values=1,
+            )
         )
 
         self.user_select.callback = (
@@ -2014,9 +1913,11 @@ class CheckMemberView(SafeView):
 
         member = self.user_select.values[0]
 
-        embed = await self.bot.build_profile_embed(
-            interaction.guild,
-            member,
+        embed = (
+            await self.bot.build_profile_embed(
+                interaction.guild,
+                member,
+            )
         )
 
         await interaction.followup.send(
@@ -2036,7 +1937,13 @@ class CheckMemberView(SafeView):
         )
 
 
-class CheckMemberModal(SafeModal):
+# =========================================================
+# CHECK MEMBER MODAL
+# =========================================================
+
+class CheckMemberModal(
+    SafeModal
+):
 
     member_input = discord.ui.TextInput(
         label="User ID or Name",
@@ -2048,6 +1955,7 @@ class CheckMemberModal(SafeModal):
         self,
         bot: GiveawayTrustBot,
     ):
+
         super().__init__(
             title="Check Member"
         )
@@ -2070,9 +1978,11 @@ class CheckMemberModal(SafeModal):
             ephemeral=True
         )
 
-        member = await self.bot.resolve_member(
-            interaction.guild,
-            self.member_input.value,
+        member = (
+            await self.bot.resolve_member(
+                interaction.guild,
+                self.member_input.value,
+            )
         )
 
         if member is None:
@@ -2082,9 +1992,11 @@ class CheckMemberModal(SafeModal):
                 ephemeral=True,
             )
 
-        embed = await self.bot.build_profile_embed(
-            interaction.guild,
-            member,
+        embed = (
+            await self.bot.build_profile_embed(
+                interaction.guild,
+                member,
+            )
         )
 
         await interaction.followup.send(
@@ -2094,27 +2006,30 @@ class CheckMemberModal(SafeModal):
 
 
 # =========================================================
-# VOUCH TARGET
+# VOUCH TARGET VIEW
 # =========================================================
 
-class VouchTargetView(SafeView):
+class VouchTargetView(
+    SafeView
+):
 
     def __init__(
         self,
         bot: GiveawayTrustBot,
     ):
+
         super().__init__(
             timeout=120
         )
 
         self.bot = bot
 
-        # IMPORTANT:
-        # normal object instead of decorator
-        self.user_select = discord.ui.UserSelect(
-            placeholder="Select a user",
-            min_values=1,
-            max_values=1,
+        self.user_select = (
+            discord.ui.UserSelect(
+                placeholder="Select a user",
+                min_values=1,
+                max_values=1,
+            )
         )
 
         self.user_select.callback = (
@@ -2159,7 +2074,10 @@ class VouchTargetView(SafeView):
                 ephemeral=True,
             )
 
-        if target.id == interaction.user.id:
+        if (
+            target.id
+            == interaction.user.id
+        ):
 
             return await interaction.response.send_message(
                 "You cannot vouch yourself.",
@@ -2187,7 +2105,13 @@ class VouchTargetView(SafeView):
         )
 
 
-class VouchMemberModal(SafeModal):
+# =========================================================
+# VOUCH MEMBER MODAL
+# =========================================================
+
+class VouchMemberModal(
+    SafeModal
+):
 
     member_input = discord.ui.TextInput(
         label="User ID or Name",
@@ -2199,6 +2123,7 @@ class VouchMemberModal(SafeModal):
         self,
         bot: GiveawayTrustBot,
     ):
+
         super().__init__(
             title="Vouch A User"
         )
@@ -2217,14 +2142,15 @@ class VouchMemberModal(SafeModal):
                 ephemeral=True,
             )
 
-        # Acknowledge BEFORE fetch_member / DB etc.
         await interaction.response.defer(
             ephemeral=True
         )
 
-        member = await self.bot.resolve_member(
-            interaction.guild,
-            self.member_input.value,
+        member = (
+            await self.bot.resolve_member(
+                interaction.guild,
+                self.member_input.value,
+            )
         )
 
         if member is None:
@@ -2241,7 +2167,10 @@ class VouchMemberModal(SafeModal):
                 ephemeral=True,
             )
 
-        if member.id == interaction.user.id:
+        if (
+            member.id
+            == interaction.user.id
+        ):
 
             return await interaction.followup.send(
                 "You cannot vouch yourself.",
@@ -2259,16 +2188,19 @@ class VouchMemberModal(SafeModal):
 
 
 # =========================================================
-# VOUCH TYPE
+# VOUCH TYPE VIEW
 # =========================================================
 
-class VouchTypeView(SafeView):
+class VouchTypeView(
+    SafeView
+):
 
     def __init__(
         self,
         bot: GiveawayTrustBot,
         target: discord.Member,
     ):
+
         super().__init__(
             timeout=120
         )
@@ -2314,10 +2246,12 @@ class VouchTypeView(SafeView):
 
 
 # =========================================================
-# VOUCH REASON
+# VOUCH REASON MODAL
 # =========================================================
 
-class VouchReasonModal(SafeModal):
+class VouchReasonModal(
+    SafeModal
+):
 
     reason = discord.ui.TextInput(
         label="Reason",
@@ -2332,6 +2266,7 @@ class VouchReasonModal(SafeModal):
         target: discord.Member,
         amount: int,
     ):
+
         super().__init__(
             title="Vouch Reason"
         )
@@ -2356,10 +2291,12 @@ class VouchReasonModal(SafeModal):
 
 
 # =========================================================
-# LEADERBOARD
+# LEADERBOARD VIEW
 # =========================================================
 
-class VouchLeaderboardView(SafeView):
+class VouchLeaderboardView(
+    SafeView
+):
 
     def __init__(
         self,
@@ -2367,6 +2304,7 @@ class VouchLeaderboardView(SafeView):
         guild: discord.Guild,
         page: int = 0,
     ):
+
         super().__init__(
             timeout=180
         )
@@ -2378,14 +2316,18 @@ class VouchLeaderboardView(SafeView):
 
         self.refresh_buttons()
 
-    def refresh_buttons(self):
+    def refresh_buttons(
+        self,
+    ):
 
         self.clear_items()
 
         previous = discord.ui.Button(
             label="<",
             style=discord.ButtonStyle.secondary,
-            disabled=self.page <= 0,
+            disabled=(
+                self.page <= 0
+            ),
         )
 
         next_button = discord.ui.Button(
@@ -2409,12 +2351,15 @@ class VouchLeaderboardView(SafeView):
             next_button
         )
 
-    async def count_members(self) -> int:
+    async def count_members(
+        self,
+    ) -> int:
 
         return len(
             [
                 member
-                for member in self.guild.members
+                for member
+                in self.guild.members
                 if not member.bot
             ]
         )
@@ -2451,7 +2396,8 @@ class VouchLeaderboardView(SafeView):
 
         valid_ids = {
             member.id
-            for member in self.guild.members
+            for member
+            in self.guild.members
             if not member.bot
         }
 
@@ -2460,7 +2406,8 @@ class VouchLeaderboardView(SafeView):
             for row in rows
             if int(
                 row["user_id"]
-            ) in valid_ids
+            )
+            in valid_ids
         ]
 
         embed = discord.Embed(
@@ -2483,10 +2430,12 @@ class VouchLeaderboardView(SafeView):
         ):
 
             lines.append(
-                f"**{index}.** "
-                f"<@{row['user_id']}> "
-                f"— **{row['trust']}/100** Trust "
-                f"· {row['vouches_received']} received"
+                (
+                    f"**{index}.** "
+                    f"<@{row['user_id']}> "
+                    f"— **{row['trust']}/100** Trust "
+                    f"· {row['vouches_received']} received"
+                )
             )
 
         embed.description = (
@@ -2494,7 +2443,9 @@ class VouchLeaderboardView(SafeView):
         )
 
         embed.set_footer(
-            text=f"Page {self.page + 1}"
+            text=(
+                f"Page {self.page + 1}"
+            )
         )
 
         return embed
@@ -2513,7 +2464,9 @@ class VouchLeaderboardView(SafeView):
 
         self.refresh_buttons()
 
-        embed = await self.build_embed()
+        embed = (
+            await self.build_embed()
+        )
 
         await interaction.edit_original_response(
             embed=embed,
@@ -2546,7 +2499,9 @@ class VouchLeaderboardView(SafeView):
 
         self.refresh_buttons()
 
-        embed = await self.build_embed()
+        embed = (
+            await self.build_embed()
+        )
 
         await interaction.edit_original_response(
             embed=embed,
@@ -2555,132 +2510,8 @@ class VouchLeaderboardView(SafeView):
 
 
 # =========================================================
-# GIVEAWAY VIEW
+# GIVEAWAY EMBED
 # =========================================================
-
-class GiveawayJoinView(SafeView):
-
-    def __init__(
-        self,
-        bot: GiveawayTrustBot,
-        giveaway_id: int,
-    ):
-        super().__init__(
-            timeout=None
-        )
-
-        self.bot = bot
-        self.giveaway_id = giveaway_id
-
-        button = discord.ui.Button(
-            label="Join Giveaway",
-            style=discord.ButtonStyle.success,
-            custom_id=(
-                f"giveaway:join:{giveaway_id}"
-            ),
-        )
-
-        button.callback = (
-            self.join_callback
-        )
-
-        self.add_item(button)
-
-    async def join_callback(
-        self,
-        interaction: discord.Interaction,
-    ):
-
-        if interaction.guild is None:
-
-            return await interaction.response.send_message(
-                "This can only be used in a server.",
-                ephemeral=True,
-            )
-
-        # IMPORTANT:
-        # defer before DB
-        await interaction.response.defer(
-            ephemeral=True
-        )
-
-        row = await self.bot.db.fetchone(
-            """
-            SELECT *
-            FROM giveaway_system
-            WHERE id = ?
-            """,
-            (self.giveaway_id,),
-        )
-
-        if row is None:
-
-            return await interaction.followup.send(
-                "This giveaway no longer exists.",
-                ephemeral=True,
-            )
-
-        if row["status"] != "ACTIVE":
-
-            return await interaction.followup.send(
-                "This giveaway is no longer active.",
-                ephemeral=True,
-            )
-
-        if int(
-            row["end_at"]
-        ) <= now_timestamp():
-
-            await self.bot.finish_giveaway(
-                self.giveaway_id
-            )
-
-            return await interaction.followup.send(
-                "This giveaway has ended.",
-                ephemeral=True,
-            )
-
-        try:
-
-            await self.bot.db.execute(
-                """
-                INSERT INTO giveaway_participants (
-                    giveaway_id,
-                    user_id,
-                    joined_at
-                )
-                VALUES (?, ?, ?)
-                """,
-                (
-                    self.giveaway_id,
-                    interaction.user.id,
-                    now_timestamp(),
-                ),
-            )
-
-        except aiosqlite.IntegrityError:
-
-            return await interaction.followup.send(
-                "You are already entered.",
-                ephemeral=True,
-            )
-
-        except Exception:
-
-            logger.exception(
-                "Giveaway join failed"
-            )
-
-            return await interaction.followup.send(
-                "Could not join the giveaway.",
-                ephemeral=True,
-            )
-
-        await interaction.followup.send(
-            "You are entered! 🎉",
-            ephemeral=True,
-        )
-
 
 def make_giveaway_embed(
     prize: str,
@@ -2722,10 +2553,149 @@ def make_giveaway_embed(
 
 
 # =========================================================
+# GIVEAWAY JOIN VIEW
+# =========================================================
+
+class GiveawayJoinView(
+    SafeView
+):
+
+    def __init__(
+        self,
+        bot: GiveawayTrustBot,
+        giveaway_id: int,
+    ):
+
+        super().__init__(
+            timeout=None
+        )
+
+        self.bot = bot
+        self.giveaway_id = giveaway_id
+
+        button = discord.ui.Button(
+            label="Join Giveaway",
+            style=discord.ButtonStyle.success,
+            custom_id=(
+                f"giveaway:join:{giveaway_id}"
+            ),
+        )
+
+        button.callback = (
+            self.join_callback
+        )
+
+        self.add_item(
+            button
+        )
+
+    async def join_callback(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        if interaction.guild is None:
+
+            return await interaction.response.send_message(
+                "This can only be used in a server.",
+                ephemeral=True,
+            )
+
+        # Immediate acknowledgement.
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
+        try:
+
+            row = await self.bot.db.fetchone(
+                """
+                SELECT *
+                FROM giveaway_system
+                WHERE id = ?
+                """,
+                (self.giveaway_id,),
+            )
+
+            if row is None:
+
+                return await interaction.followup.send(
+                    "This giveaway no longer exists.",
+                    ephemeral=True,
+                )
+
+            if row["status"] != "ACTIVE":
+
+                return await interaction.followup.send(
+                    "This giveaway is no longer active.",
+                    ephemeral=True,
+                )
+
+            if int(
+                row["end_at"]
+            ) <= now_timestamp():
+
+                await self.bot.finish_giveaway(
+                    self.giveaway_id
+                )
+
+                return await interaction.followup.send(
+                    "This giveaway has ended.",
+                    ephemeral=True,
+                )
+
+            try:
+
+                await self.bot.db.execute(
+                    """
+                    INSERT INTO giveaway_participants (
+                        giveaway_id,
+                        user_id,
+                        joined_at
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        self.giveaway_id,
+                        interaction.user.id,
+                        now_timestamp(),
+                    ),
+                )
+
+            except aiosqlite.IntegrityError:
+
+                return await interaction.followup.send(
+                    "You are already entered.",
+                    ephemeral=True,
+                )
+
+            await interaction.followup.send(
+                "You are entered! 🎉",
+                ephemeral=True,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Giveaway join failed"
+            )
+
+            await interaction.followup.send(
+                "Could not join the giveaway.",
+                ephemeral=True,
+            )
+
+
+# =========================================================
 # BOT INSTANCE
 # =========================================================
 
 bot = GiveawayTrustBot()
+
+
+# =========================================================
+# GIVEAWAY GROUP
+# =========================================================
 
 giveaway_group = app_commands.Group(
     name="giveaway",
@@ -2756,71 +2726,83 @@ async def activity_command(
             ephemeral=True,
         )
 
-    # IMPORTANT
     await interaction.response.defer(
         ephemeral=True
     )
 
-    await bot.record_activity(
-        interaction.guild.id,
-        interaction.user.id,
-        command=True,
-    )
+    try:
 
-    row = await bot.db.fetchone(
-        """
-        SELECT
-            messages,
-            commands,
-            last_active
-        FROM user_activity
-        WHERE guild_id = ?
-          AND user_id = ?
-        """,
-        (
+        await bot.record_activity(
             interaction.guild.id,
             interaction.user.id,
-        ),
-    )
+            command=True,
+        )
 
-    embed = discord.Embed(
-        title=(
-            f"{interaction.user.display_name}"
-            "'s Activity"
-        ),
-    )
+        row = await bot.db.fetchone(
+            """
+            SELECT
+                messages,
+                commands,
+                last_active
+            FROM user_activity
+            WHERE guild_id = ?
+              AND user_id = ?
+            """,
+            (
+                interaction.guild.id,
+                interaction.user.id,
+            ),
+        )
 
-    embed.add_field(
-        name="Messages",
-        value=str(
-            row["messages"]
-            if row
-            else 0
-        ),
-    )
+        embed = discord.Embed(
+            title=(
+                f"{interaction.user.display_name}"
+                "'s Activity"
+            ),
+        )
 
-    embed.add_field(
-        name="Commands",
-        value=str(
-            row["commands"]
-            if row
-            else 0
-        ),
-    )
+        embed.add_field(
+            name="Messages",
+            value=str(
+                row["messages"]
+                if row
+                else 0
+            ),
+        )
 
-    embed.add_field(
-        name="Last active",
-        value=format_timestamp(
-            row["last_active"]
-            if row
-            else None
-        ),
-    )
+        embed.add_field(
+            name="Commands",
+            value=str(
+                row["commands"]
+                if row
+                else 0
+            ),
+        )
 
-    await interaction.followup.send(
-        embed=embed,
-        ephemeral=True,
-    )
+        embed.add_field(
+            name="Last active",
+            value=format_timestamp(
+                row["last_active"]
+                if row
+                else None
+            ),
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Activity command failed"
+        )
+
+        await interaction.followup.send(
+            "Could not load activity.",
+            ephemeral=True,
+        )
 
 
 # =========================================================
@@ -2839,55 +2821,68 @@ async def botstats_command(
         ephemeral=True
     )
 
-    row = await bot.db.fetchone(
-        """
-        SELECT COUNT(*) AS count
-        FROM giveaway_system
-        """
-    )
+    try:
 
-    giveaway_count = int(
-        row["count"]
-        if row
-        else 0
-    )
+        row = await bot.db.fetchone(
+            """
+            SELECT COUNT(*) AS count
+            FROM giveaway_system
+            """
+        )
 
-    embed = discord.Embed(
-        title="Bot Stats"
-    )
+        giveaway_count = int(
+            row["count"]
+            if row
+            else 0
+        )
 
-    embed.add_field(
-        name="Servers",
-        value=str(
-            len(bot.guilds)
-        ),
-    )
+        embed = discord.Embed(
+            title="Bot Stats"
+        )
 
-    embed.add_field(
-        name="Users cached",
-        value=str(
-            len(bot.users)
-        ),
-    )
+        embed.add_field(
+            name="Servers",
+            value=str(
+                len(bot.guilds)
+            ),
+        )
 
-    embed.add_field(
-        name="Giveaways",
-        value=str(
-            giveaway_count
-        ),
-    )
+        embed.add_field(
+            name="Users cached",
+            value=str(
+                len(bot.users)
+            ),
+        )
 
-    embed.add_field(
-        name="Latency",
-        value=(
-            f"{round(bot.latency * 1000)} ms"
-        ),
-    )
+        embed.add_field(
+            name="Giveaways",
+            value=str(
+                giveaway_count
+            ),
+        )
 
-    await interaction.followup.send(
-        embed=embed,
-        ephemeral=True,
-    )
+        embed.add_field(
+            name="Latency",
+            value=(
+                f"{round(bot.latency * 1000)} ms"
+            ),
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Botstats command failed"
+        )
+
+        await interaction.followup.send(
+            "Could not load bot stats.",
+            ephemeral=True,
+        )
 
 
 # =========================================================
@@ -3098,8 +3093,11 @@ async def tempban_command(
         )
 
     if (
-        member.top_role >= interaction.user.top_role
-        and interaction.user.id != interaction.guild.owner_id
+        member.top_role
+        >= interaction.user.top_role
+        and
+        interaction.user.id
+        != interaction.guild.owner_id
     ):
 
         return await interaction.response.send_message(
@@ -3155,7 +3153,7 @@ async def tempban_command(
     except Exception:
 
         logger.exception(
-            "Temp ban failed"
+            "Temporary ban failed"
         )
 
         return await interaction.followup.send(
@@ -3308,8 +3306,10 @@ async def giveaway_create(
             interaction.user,
         )
 
-        message = await interaction.channel.send(
-            embed=embed
+        message = (
+            await interaction.channel.send(
+                embed=embed
+            )
         )
 
         giveaway_id = (
@@ -3404,7 +3404,8 @@ async def giveaway_end(
 
         if (
             row is None
-            or int(row["guild_id"])
+            or
+            int(row["guild_id"])
             != interaction.guild.id
         ):
 
@@ -3450,7 +3451,7 @@ async def giveaway_end(
 
 
 # =========================================================
-# COMMAND ERROR HANDLER
+# APPLICATION COMMAND ERROR
 # =========================================================
 
 @bot.tree.error
@@ -3490,8 +3491,8 @@ async def on_app_command_error(
     else:
 
         message = (
-            "Something went wrong while "
-            "processing that command."
+            "Something went wrong while processing "
+            "that command."
         )
 
     await safe_interaction_error(
@@ -3512,10 +3513,30 @@ async def main():
             "DISCORD_TOKEN is missing"
         )
 
-    await bot.start(
-        TOKEN
-    )
+    try:
 
+        await bot.start(
+            TOKEN
+        )
+
+    finally:
+
+        try:
+
+            if not bot.is_closed():
+
+                await bot.close()
+
+        except Exception:
+
+            logger.exception(
+                "Error while closing bot"
+            )
+
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
 
