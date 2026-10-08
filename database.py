@@ -4,7 +4,6 @@ import os
 
 import aiosqlite
 
-
 logger = logging.getLogger("bot.database")
 
 
@@ -35,10 +34,6 @@ class DatabaseController:
                 await connection.execute("PRAGMA synchronous=FULL;")
                 await connection.execute("PRAGMA foreign_keys=ON;")
                 await connection.execute("PRAGMA busy_timeout=5000;")
-
-                # ============================================================
-                # GIVEAWAY SYSTEM
-                # ============================================================
 
                 await connection.execute(
                     """
@@ -96,15 +91,10 @@ class DatabaseController:
 
                 await connection.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS
-                    idx_giveaway_history_guild_completed
+                    CREATE INDEX IF NOT EXISTS idx_giveaway_history_guild_completed
                     ON giveaway_history(guild_id, completed_at DESC)
                     """
                 )
-
-                # ============================================================
-                # USER ACTIVITY
-                # ============================================================
 
                 await connection.execute(
                     """
@@ -123,10 +113,6 @@ class DatabaseController:
                     """
                 )
 
-                # ============================================================
-                # VOUCH SYSTEM
-                # ============================================================
-
                 await connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS user_vouch_network (
@@ -143,13 +129,8 @@ class DatabaseController:
 
                 await connection.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS
-                    idx_vouch_network_leaderboard
-                    ON user_vouch_network(
-                        guild_id,
-                        trust_score DESC,
-                        user_id ASC
-                    )
+                    CREATE INDEX IF NOT EXISTS idx_vouch_network_leaderboard
+                    ON user_vouch_network(guild_id, trust_score DESC, user_id ASC)
                     """
                 )
 
@@ -168,7 +149,6 @@ class DatabaseController:
                     """
                 )
 
-                # Remove duplicate vouches before creating unique index.
                 await connection.execute(
                     """
                     DELETE FROM vouch_history
@@ -182,27 +162,17 @@ class DatabaseController:
 
                 await connection.execute(
                     """
-                    CREATE UNIQUE INDEX IF NOT EXISTS
-                    idx_unique_vouch
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_vouch
                     ON vouch_history(guild_id, target_id, giver_id)
                     """
                 )
 
                 await connection.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS
-                    idx_vouch_history_target
-                    ON vouch_history(
-                        guild_id,
-                        target_id,
-                        timestamp DESC
-                    )
+                    CREATE INDEX IF NOT EXISTS idx_vouch_history_target
+                    ON vouch_history(guild_id, target_id, timestamp DESC)
                     """
                 )
-
-                # ============================================================
-                # TEMPORARY BANS
-                # ============================================================
 
                 await connection.execute(
                     """
@@ -215,24 +185,13 @@ class DatabaseController:
                     """
                 )
 
-                # ============================================================
-                # MIGRATIONS
-                # ============================================================
-
-                async def add_column(
-                    table: str,
-                    column: str,
-                    definition: str,
-                ):
+                async def add_column(table, column, definition):
                     async with connection.execute(
                         f"PRAGMA table_info({table})"
                     ) as cursor:
                         rows = await cursor.fetchall()
 
-                    existing_columns = {
-                        row[1]
-                        for row in rows
-                    }
+                    existing_columns = {row[1] for row in rows}
 
                     if column not in existing_columns:
                         await connection.execute(
@@ -241,7 +200,11 @@ class DatabaseController:
                         )
 
                 migrations = [
-                    ("giveaway_system", "host_id", "INTEGER DEFAULT 0"),
+                    (
+                        "giveaway_system",
+                        "host_id",
+                        "INTEGER DEFAULT 0",
+                    ),
                     (
                         "giveaway_system",
                         "result_message_id",
@@ -327,7 +290,7 @@ class DatabaseController:
 
     async def execute(
         self,
-        query: str,
+        query,
         params=(),
     ) -> int:
         if self.connection is None:
@@ -341,12 +304,13 @@ class DatabaseController:
                 params,
             ) as cursor:
                 rowcount = cursor.rowcount
-                await self.connection.commit()
-                return rowcount
+
+            await self.connection.commit()
+            return rowcount
 
     async def fetchone(
         self,
-        query: str,
+        query,
         params=(),
     ):
         if self.connection is None:
@@ -363,7 +327,7 @@ class DatabaseController:
 
     async def fetchall(
         self,
-        query: str,
+        query,
         params=(),
     ):
         if self.connection is None:
