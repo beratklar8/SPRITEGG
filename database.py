@@ -155,7 +155,7 @@ class DatabaseController:
                     CREATE TABLE IF NOT EXISTS user_vouch_network (
                         guild_id INTEGER,
                         user_id INTEGER,
-                        trust_score INTEGER DEFAULT 50,
+                        trust_score INTEGER DEFAULT 25,
                         vouches_given INTEGER DEFAULT 0,
                         vouch_positive INTEGER DEFAULT 0,
                         vouch_negative INTEGER DEFAULT 0,
@@ -196,8 +196,8 @@ class DatabaseController:
                     """
                 )
 
-                # Remove duplicate historical vouches before creating
-                # the unique constraint.
+                # Remove duplicate historical vouches before
+                # creating the unique index.
                 await connection.execute(
                     """
                     DELETE FROM vouch_history
@@ -224,18 +224,6 @@ class DatabaseController:
                     """
                 )
 
-                await connection.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS
-                    idx_vouch_history_target
-                    ON vouch_history(
-                        guild_id,
-                        target_id,
-                        timestamp DESC
-                    )
-                    """
-                )
-
                 # ====================================================
                 # TEMPORARY BANS
                 # ====================================================
@@ -250,103 +238,6 @@ class DatabaseController:
                     )
                     """
                 )
-
-                # ====================================================
-                # MIGRATIONS
-                # ====================================================
-
-                async def add_column(
-                    table: str,
-                    column: str,
-                    definition: str,
-                ):
-                    async with connection.execute(
-                        f"PRAGMA table_info({table})"
-                    ) as cursor:
-                        rows = await cursor.fetchall()
-
-                    existing_columns = {
-                        row[1]
-                        for row in rows
-                    }
-
-                    if column not in existing_columns:
-                        await connection.execute(
-                            f"""
-                            ALTER TABLE {table}
-                            ADD COLUMN {column} {definition}
-                            """
-                        )
-
-                migrations = [
-                    (
-                        "giveaway_system",
-                        "host_id",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "result_message_id",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "req_daily",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "req_weekly",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "req_monthly",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "req_total",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "bypass_role_id",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "end_color",
-                        "TEXT",
-                    ),
-                    (
-                        "giveaway_system",
-                        "retry_count",
-                        "INTEGER DEFAULT 0",
-                    ),
-                    (
-                        "giveaway_system",
-                        "last_error",
-                        "TEXT",
-                    ),
-                    (
-                        "giveaway_system",
-                        "result_winners",
-                        "TEXT",
-                    ),
-                    (
-                        "giveaway_system",
-                        "result_participant_count",
-                        "INTEGER DEFAULT 0",
-                    ),
-                ]
-
-                for table, column, definition in migrations:
-                    await add_column(
-                        table,
-                        column,
-                        definition,
-                    )
 
                 await connection.commit()
 
@@ -363,7 +254,12 @@ class DatabaseController:
                 )
 
                 if connection is not None:
-                    await connection.close()
+                    try:
+                        await connection.close()
+                    except Exception:
+                        logger.exception(
+                            "Failed to close database after initialization error."
+                        )
 
                 raise
 
@@ -422,35 +318,6 @@ class DatabaseController:
             ) as cursor:
                 return await cursor.fetchall()
 
-    async def transaction(
-        self,
-        queries_with_params,
-    ) -> bool:
-        if self.connection is None:
-            raise RuntimeError(
-                "Database connection is not initialized."
-            )
-
-        async with self.operation_lock:
-            try:
-                await self.connection.execute(
-                    "BEGIN IMMEDIATE"
-                )
-
-                for query, params in queries_with_params:
-                    await self.connection.execute(
-                        query,
-                        params,
-                    )
-
-                await self.connection.commit()
-
-                return True
-
-            except Exception:
-                await self.connection.rollback()
-                raise
-
     async def close(self):
         if self.connection is None:
             return
@@ -458,9 +325,13 @@ class DatabaseController:
         async with self.operation_lock:
             try:
                 await self.connection.close()
+            except Exception:
+                logger.exception(
+                    "Failed to close database connection."
+                )
             finally:
                 self.connection = None
 
         logger.info(
             "Database connection closed."
-        )
+                )
