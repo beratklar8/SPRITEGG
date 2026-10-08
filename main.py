@@ -24,10 +24,6 @@ except Exception:
 from database import DatabaseController
 
 
-# =========================================================
-# ENVIRONMENT / LOGGING
-# =========================================================
-
 load_dotenv()
 
 logging.basicConfig(
@@ -37,10 +33,6 @@ logging.basicConfig(
 
 logger = logging.getLogger("giveaway-trust-bot")
 
-
-# =========================================================
-# CONFIG
-# =========================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -66,20 +58,15 @@ PORT = int(
 )
 
 
+ROLE_50_ID = 1529114068412141639
+ROLE_100_ID = 1529114203204489277
+
+
 # =========================================================
 # DATABASE PATH
 # =========================================================
 
 def get_database_path() -> str:
-    """
-    Use DATABASE_PATH when supplied and writable.
-    Otherwise use the current application directory.
-
-    This intentionally does NOT default to /data because
-    many Render services do not have a writable /data folder
-    unless a persistent disk is mounted there.
-    """
-
     configured = os.getenv(
         "DATABASE_PATH",
         "",
@@ -95,8 +82,7 @@ def get_database_path() -> str:
             )
 
             test_file = (
-                requested.parent
-                / ".db_write_test"
+                requested.parent / ".db_write_test"
             )
 
             with open(
@@ -120,12 +106,9 @@ def get_database_path() -> str:
                 configured,
             )
 
-    fallback = (
-        Path.cwd()
-        / "bot_database.db"
+    return str(
+        Path.cwd() / "bot_database.db"
     )
-
-    return str(fallback)
 
 
 DATABASE_PATH = get_database_path()
@@ -137,19 +120,10 @@ logger.info(
 
 
 # =========================================================
-# ROLES
-# =========================================================
-
-ROLE_50_ID = 1529114068412141639
-ROLE_100_ID = 1529114203204489277
-
-
-# =========================================================
 # DISCORD INTENTS
 # =========================================================
 
 intents = discord.Intents.default()
-
 intents.guilds = True
 intents.members = True
 intents.message_content = True
@@ -160,24 +134,19 @@ intents.message_content = True
 # =========================================================
 
 def now_timestamp() -> int:
-    return int(
-        time.time()
-    )
+    return int(time.time())
 
 
 def format_timestamp(
     timestamp: int | float | None,
 ) -> str:
-
     if not timestamp:
         return "Unknown"
 
     return datetime.fromtimestamp(
         float(timestamp),
         tz=timezone.utc,
-    ).strftime(
-        "%Y-%m-%d %H:%M UTC"
-    )
+    ).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def clamp(
@@ -185,7 +154,6 @@ def clamp(
     minimum: int,
     maximum: int,
 ) -> int:
-
     return max(
         minimum,
         min(
@@ -221,34 +189,26 @@ def parse_duration(
         "w": 604800,
     }
 
-    seconds = (
-        amount
-        * multipliers[unit]
-    )
+    seconds = amount * multipliers[unit]
 
     if seconds <= 0:
         return None
 
-    if seconds > (
-        30
-        * 24
-        * 60
-        * 60
-    ):
+    if seconds > 30 * 24 * 60 * 60:
         return None
 
     return seconds
 
 
 def owner_only():
+
     async def predicate(
         interaction: discord.Interaction,
     ) -> bool:
 
         return (
             BOT_OWNER_ID > 0
-            and interaction.user.id
-            == BOT_OWNER_ID
+            and interaction.user.id == BOT_OWNER_ID
         )
 
     return app_commands.check(
@@ -260,10 +220,6 @@ async def safe_interaction_error(
     interaction: discord.Interaction,
     message: str,
 ):
-    """
-    Safely answer an interaction even when it
-    has already been acknowledged.
-    """
 
     try:
 
@@ -347,9 +303,7 @@ class SafeModal(discord.ui.Modal):
 # BOT
 # =========================================================
 
-class GiveawayTrustBot(
-    discord.Client
-):
+class GiveawayTrustBot(discord.Client):
 
     def __init__(self):
 
@@ -357,24 +311,17 @@ class GiveawayTrustBot(
             intents=intents
         )
 
-        self.tree = (
-            app_commands.CommandTree(
-                self
-            )
+        self.tree = app_commands.CommandTree(
+            self
         )
 
-        self.db = (
-            DatabaseController(
-                DATABASE_PATH
-            )
+        self.db = DatabaseController(
+            DATABASE_PATH
         )
 
         self.groq = None
 
-        if (
-            GROQ_API_KEY
-            and Groq is not None
-        ):
+        if GROQ_API_KEY and Groq is not None:
 
             try:
 
@@ -392,40 +339,84 @@ class GiveawayTrustBot(
         self.health_site = None
 
     # =====================================================
-    # SETUP HOOK
+    # DATABASE INITIALIZATION
     # =====================================================
 
-    async def setup_hook(
-        self,
-    ):
+    async def initialize_database(self):
+
+        """
+        Supports DatabaseController implementations that
+        initialize automatically, or expose initialize/setup/init.
+        """
+
+        for method_name in (
+            "initialize",
+            "setup",
+            "init",
+        ):
+
+            method = getattr(
+                self.db,
+                method_name,
+                None,
+            )
+
+            if method is None:
+                continue
+
+            if not callable(method):
+                continue
+
+            result = method()
+
+            if asyncio.iscoroutine(result):
+                await result
+
+            logger.info(
+                "Database initialized using %s().",
+                method_name,
+            )
+
+            return
+
+        logger.info(
+            "DatabaseController initializes itself; "
+            "no initialization method required."
+        )
+
+    # =====================================================
+    # SETUP
+    # =====================================================
+
+    async def setup_hook(self):
 
         logger.info(
             "Initializing database..."
         )
 
-        await self.db.init()
+        await self.initialize_database()
 
         logger.info(
-            "Database initialized."
+            "Database ready."
         )
 
-        # Persistent trust panel
         self.add_view(
             TrustPanelView(self)
         )
 
-        # Recover active giveaways
         await self.recover_giveaways()
 
-        # Start background loops
-        self.giveaway_loop.start()
-        self.temp_ban_loop.start()
-        self.activity_loop.start()
+        if not self.giveaway_loop.is_running():
+            self.giveaway_loop.start()
 
-        # Health server
+        if not self.temp_ban_loop.is_running():
+            self.temp_ban_loop.start()
+
+        if not self.activity_loop.is_running():
+            self.activity_loop.start()
+
         await self.start_health_server()
 
-        # Sync commands
         try:
 
             synced = await self.tree.sync()
@@ -445,9 +436,7 @@ class GiveawayTrustBot(
     # READY
     # =====================================================
 
-    async def on_ready(
-        self,
-    ):
+    async def on_ready(self):
 
         logger.info(
             "Logged in as %s",
@@ -480,17 +469,13 @@ class GiveawayTrustBot(
     # CLOSE
     # =====================================================
 
-    async def close(
-        self,
-    ):
+    async def close(self):
 
-        loops = (
+        for loop in (
             self.giveaway_loop,
             self.temp_ban_loop,
             self.activity_loop,
-        )
-
-        for loop in loops:
+        ):
 
             try:
 
@@ -513,6 +498,7 @@ class GiveawayTrustBot(
         try:
             await self.db.close()
         except Exception:
+
             logger.exception(
                 "Could not close database"
             )
@@ -523,9 +509,7 @@ class GiveawayTrustBot(
     # HEALTH SERVER
     # =====================================================
 
-    async def start_health_server(
-        self,
-    ):
+    async def start_health_server(self):
 
         if self.health_runner is not None:
             return
@@ -547,8 +531,8 @@ class GiveawayTrustBot(
             self.health_root,
         )
 
-        self.health_runner = (
-            web.AppRunner(app)
+        self.health_runner = web.AppRunner(
+            app
         )
 
         await self.health_runner.setup()
@@ -579,9 +563,7 @@ class GiveawayTrustBot(
                     if self.user
                     else None
                 ),
-                "guilds": len(
-                    self.guilds
-                ),
+                "guilds": len(self.guilds),
                 "time": now_timestamp(),
             }
         )
@@ -643,7 +625,6 @@ class GiveawayTrustBot(
 
         raw = str(value).strip()
 
-        # Mention
         if raw.startswith("<@"):
 
             raw = (
@@ -653,7 +634,6 @@ class GiveawayTrustBot(
                 .replace(">", "")
             )
 
-        # ID
         try:
 
             user_id = int(raw)
@@ -678,7 +658,6 @@ class GiveawayTrustBot(
         except ValueError:
             pass
 
-        # Username/display name
         lowered = raw.lower()
 
         for member in guild.members:
@@ -687,11 +666,9 @@ class GiveawayTrustBot(
                 continue
 
             if (
-                member.name.lower()
-                == lowered
+                member.name.lower() == lowered
                 or
-                member.display_name.lower()
-                == lowered
+                member.display_name.lower() == lowered
             ):
 
                 return member
@@ -759,7 +736,7 @@ class GiveawayTrustBot(
             )
 
     # =====================================================
-    # TRUST PROFILE
+    # PROFILE
     # =====================================================
 
     async def build_profile_embed(
@@ -827,7 +804,7 @@ class GiveawayTrustBot(
         return embed
 
     # =====================================================
-    # VOUCH
+    # RECORD VOUCH
     # =====================================================
 
     async def record_vouch(
@@ -854,10 +831,7 @@ class GiveawayTrustBot(
                 ephemeral=True,
             )
 
-        if (
-            target.id
-            == interaction.user.id
-        ):
+        if target.id == interaction.user.id:
 
             return await interaction.response.send_message(
                 "You cannot vouch yourself.",
@@ -870,22 +844,18 @@ class GiveawayTrustBot(
             else -5
         )
 
-        # IMPORTANT:
-        # Answer the Discord interaction immediately.
         await interaction.response.defer(
             ephemeral=True
         )
 
         try:
 
-            created = (
-                await self.db.record_vouch(
-                    guild.id,
-                    target.id,
-                    interaction.user.id,
-                    amount,
-                    reason,
-                )
+            created = await self.db.record_vouch(
+                guild.id,
+                target.id,
+                interaction.user.id,
+                amount,
+                reason,
             )
 
         except Exception:
@@ -957,13 +927,11 @@ class GiveawayTrustBot(
                 inline=False,
             )
 
-            # Tell the user first.
             await interaction.followup.send(
                 embed=embed,
                 ephemeral=True,
             )
 
-            # Then write log.
             await self.send_transaction_log(
                 guild,
                 embed,
@@ -1016,10 +984,8 @@ class GiveawayTrustBot(
 
                 try:
 
-                    channel = (
-                        await self.fetch_channel(
-                            row["channel_id"]
-                        )
+                    channel = await self.fetch_channel(
+                        row["channel_id"]
                     )
 
                 except discord.HTTPException:
@@ -1037,7 +1003,7 @@ class GiveawayTrustBot(
             )
 
     # =====================================================
-    # GIVEAWAY CREATE
+    # GIVEAWAY RECORD
     # =====================================================
 
     async def create_giveaway_record(
@@ -1086,17 +1052,25 @@ class GiveawayTrustBot(
     # RECOVER GIVEAWAYS
     # =====================================================
 
-    async def recover_giveaways(
-        self,
-    ):
+    async def recover_giveaways(self):
 
-        rows = await self.db.fetchall(
-            """
-            SELECT *
-            FROM giveaway_system
-            WHERE status = 'ACTIVE'
-            """
-        )
+        try:
+
+            rows = await self.db.fetchall(
+                """
+                SELECT *
+                FROM giveaway_system
+                WHERE status = 'ACTIVE'
+                """
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Could not load active giveaways"
+            )
+
+            return
 
         for row in rows:
 
@@ -1129,7 +1103,6 @@ class GiveawayTrustBot(
         forced: bool = False,
     ) -> bool:
 
-        # Prevent two loop runs / manual end at once.
         async with self.db._lock:
 
             db = self.db.require_db()
@@ -1177,23 +1150,20 @@ class GiveawayTrustBot(
 
         try:
 
-            participants = (
-                await self.db.fetchall(
-                    """
-                    SELECT user_id
-                    FROM giveaway_participants
-                    WHERE giveaway_id = ?
-                    """,
-                    (giveaway_id,),
-                )
+            participants = await self.db.fetchall(
+                """
+                SELECT user_id
+                FROM giveaway_participants
+                WHERE giveaway_id = ?
+                """,
+                (giveaway_id,),
             )
 
             user_ids = [
                 int(
                     participant["user_id"]
                 )
-                for participant
-                in participants
+                for participant in participants
             ]
 
             winner_count = min(
@@ -1201,36 +1171,25 @@ class GiveawayTrustBot(
                 len(user_ids),
             )
 
-            if winner_count:
-
-                winners = random.sample(
+            winners = (
+                random.sample(
                     user_ids,
                     winner_count,
                 )
-
-            else:
-
-                winners = []
+                if winner_count
+                else []
+            )
 
             winner_mentions = [
                 f"<@{user_id}>"
                 for user_id in winners
             ]
 
-            if winner_mentions:
-
-                winner_text = (
-                    ", ".join(
-                        winner_mentions
-                    )
-                )
-
-            else:
-
-                winner_text = (
-                    "No winner — "
-                    "not enough participants."
-                )
+            winner_text = (
+                ", ".join(winner_mentions)
+                if winner_mentions
+                else "No winner — not enough participants."
+            )
 
             embed = discord.Embed(
                 title="🎉 Giveaway Ended",
@@ -1263,12 +1222,8 @@ class GiveawayTrustBot(
 
                 try:
 
-                    message = (
-                        await channel.fetch_message(
-                            int(
-                                row["message_id"]
-                            )
-                        )
+                    message = await channel.fetch_message(
+                        int(row["message_id"])
                     )
 
                     await message.edit(
@@ -1292,10 +1247,7 @@ class GiveawayTrustBot(
                     try:
 
                         await channel.send(
-                            (
-                                "🎉 Giveaway winner(s): "
-                                f"{winner_text}"
-                            )
+                            f"🎉 Giveaway winner(s): {winner_text}"
                         )
 
                     except discord.HTTPException:
@@ -1364,9 +1316,7 @@ class GiveawayTrustBot(
     # =====================================================
 
     @tasks.loop(seconds=15)
-    async def temp_ban_loop(
-        self,
-    ):
+    async def temp_ban_loop(self):
 
         try:
 
@@ -1395,9 +1345,7 @@ class GiveawayTrustBot(
                                     row["user_id"]
                                 )
                             ),
-                            reason=(
-                                "Temporary ban expired"
-                            ),
+                            reason="Temporary ban expired",
                         )
 
                     except discord.HTTPException:
@@ -1422,9 +1370,7 @@ class GiveawayTrustBot(
             )
 
     @temp_ban_loop.before_loop
-    async def before_temp_ban_loop(
-        self,
-    ):
+    async def before_temp_ban_loop(self):
 
         await self.wait_until_ready()
 
@@ -1433,9 +1379,7 @@ class GiveawayTrustBot(
     # =====================================================
 
     @tasks.loop(seconds=5)
-    async def giveaway_loop(
-        self,
-    ):
+    async def giveaway_loop(self):
 
         try:
 
@@ -1463,9 +1407,7 @@ class GiveawayTrustBot(
             )
 
     @giveaway_loop.before_loop
-    async def before_giveaway_loop(
-        self,
-    ):
+    async def before_giveaway_loop(self):
 
         await self.wait_until_ready()
 
@@ -1474,16 +1416,12 @@ class GiveawayTrustBot(
     # =====================================================
 
     @tasks.loop(seconds=60)
-    async def activity_loop(
-        self,
-    ):
+    async def activity_loop(self):
 
         return
 
     @activity_loop.before_loop
-    async def before_activity_loop(
-        self,
-    ):
+    async def before_activity_loop(self):
 
         await self.wait_until_ready()
 
@@ -1508,8 +1446,7 @@ class GiveawayTrustBot(
                         {
                             "role": "system",
                             "content": (
-                                "You are a helpful "
-                                "Discord bot. "
+                                "You are a helpful Discord bot. "
                                 "Keep responses concise."
                             ),
                         },
@@ -1592,7 +1529,7 @@ class GiveawayTrustBot(
             except Exception:
 
                 logger.exception(
-                    "Could not record message activity"
+                    "Could not record activity"
                 )
 
         if (
@@ -1615,10 +1552,8 @@ class GiveawayTrustBot(
 
             if clean:
 
-                answer = (
-                    await self.ask_ai(
-                        clean
-                    )
+                answer = await self.ask_ai(
+                    clean
                 )
 
                 if answer:
@@ -1635,12 +1570,10 @@ class GiveawayTrustBot(
 
 
 # =========================================================
-# TRUST PANEL
+# TRUST PANEL VIEW
 # =========================================================
 
-class TrustPanelView(
-    SafeView
-):
+class TrustPanelView(SafeView):
 
     def __init__(
         self,
@@ -1652,10 +1585,6 @@ class TrustPanelView(
         )
 
         self.bot = bot
-
-    # -----------------------------------------------------
-    # CHECK MY VOUCH
-    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Check My Vouch",
@@ -1688,10 +1617,8 @@ class TrustPanelView(
 
             try:
 
-                member = (
-                    await interaction.guild.fetch_member(
-                        interaction.user.id
-                    )
+                member = await interaction.guild.fetch_member(
+                    interaction.user.id
                 )
 
             except discord.HTTPException:
@@ -1701,21 +1628,15 @@ class TrustPanelView(
                     ephemeral=True,
                 )
 
-        embed = (
-            await self.bot.build_profile_embed(
-                interaction.guild,
-                member,
-            )
+        embed = await self.bot.build_profile_embed(
+            interaction.guild,
+            member,
         )
 
         await interaction.followup.send(
             embed=embed,
             ephemeral=True,
         )
-
-    # -----------------------------------------------------
-    # CHECK USER
-    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Check User's Vouch",
@@ -1743,10 +1664,6 @@ class TrustPanelView(
             ephemeral=True,
         )
 
-    # -----------------------------------------------------
-    # VOUCH USER
-    # -----------------------------------------------------
-
     @discord.ui.button(
         label="Vouch A User",
         style=discord.ButtonStyle.success,
@@ -1773,10 +1690,6 @@ class TrustPanelView(
             ephemeral=True,
         )
 
-    # -----------------------------------------------------
-    # REWARDS
-    # -----------------------------------------------------
-
     @discord.ui.button(
         label="Vouch Rewards",
         style=discord.ButtonStyle.secondary,
@@ -1802,10 +1715,6 @@ class TrustPanelView(
             embed=embed,
             ephemeral=True,
         )
-
-    # -----------------------------------------------------
-    # LEADERBOARD
-    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Vouch Leaderboard",
@@ -1848,9 +1757,7 @@ class TrustPanelView(
 # CHECK MEMBER VIEW
 # =========================================================
 
-class CheckMemberView(
-    SafeView
-):
+class CheckMemberView(SafeView):
 
     def __init__(
         self,
@@ -1863,15 +1770,10 @@ class CheckMemberView(
 
         self.bot = bot
 
-        # IMPORTANT:
-        # UserSelect is created normally.
-        # No @discord.ui.UserSelect decorator.
-        self.user_select = (
-            discord.ui.UserSelect(
-                placeholder="Select a user",
-                min_values=1,
-                max_values=1,
-            )
+        self.user_select = discord.ui.UserSelect(
+            placeholder="Select a user",
+            min_values=1,
+            max_values=1,
         )
 
         self.user_select.callback = (
@@ -1913,11 +1815,9 @@ class CheckMemberView(
 
         member = self.user_select.values[0]
 
-        embed = (
-            await self.bot.build_profile_embed(
-                interaction.guild,
-                member,
-            )
+        embed = await self.bot.build_profile_embed(
+            interaction.guild,
+            member,
         )
 
         await interaction.followup.send(
@@ -1941,9 +1841,7 @@ class CheckMemberView(
 # CHECK MEMBER MODAL
 # =========================================================
 
-class CheckMemberModal(
-    SafeModal
-):
+class CheckMemberModal(SafeModal):
 
     member_input = discord.ui.TextInput(
         label="User ID or Name",
@@ -1978,11 +1876,9 @@ class CheckMemberModal(
             ephemeral=True
         )
 
-        member = (
-            await self.bot.resolve_member(
-                interaction.guild,
-                self.member_input.value,
-            )
+        member = await self.bot.resolve_member(
+            interaction.guild,
+            self.member_input.value,
         )
 
         if member is None:
@@ -1992,11 +1888,9 @@ class CheckMemberModal(
                 ephemeral=True,
             )
 
-        embed = (
-            await self.bot.build_profile_embed(
-                interaction.guild,
-                member,
-            )
+        embed = await self.bot.build_profile_embed(
+            interaction.guild,
+            member,
         )
 
         await interaction.followup.send(
@@ -2009,9 +1903,7 @@ class CheckMemberModal(
 # VOUCH TARGET VIEW
 # =========================================================
 
-class VouchTargetView(
-    SafeView
-):
+class VouchTargetView(SafeView):
 
     def __init__(
         self,
@@ -2024,12 +1916,10 @@ class VouchTargetView(
 
         self.bot = bot
 
-        self.user_select = (
-            discord.ui.UserSelect(
-                placeholder="Select a user",
-                min_values=1,
-                max_values=1,
-            )
+        self.user_select = discord.ui.UserSelect(
+            placeholder="Select a user",
+            min_values=1,
+            max_values=1,
         )
 
         self.user_select.callback = (
@@ -2074,10 +1964,7 @@ class VouchTargetView(
                 ephemeral=True,
             )
 
-        if (
-            target.id
-            == interaction.user.id
-        ):
+        if target.id == interaction.user.id:
 
             return await interaction.response.send_message(
                 "You cannot vouch yourself.",
@@ -2109,9 +1996,7 @@ class VouchTargetView(
 # VOUCH MEMBER MODAL
 # =========================================================
 
-class VouchMemberModal(
-    SafeModal
-):
+class VouchMemberModal(SafeModal):
 
     member_input = discord.ui.TextInput(
         label="User ID or Name",
@@ -2146,11 +2031,9 @@ class VouchMemberModal(
             ephemeral=True
         )
 
-        member = (
-            await self.bot.resolve_member(
-                interaction.guild,
-                self.member_input.value,
-            )
+        member = await self.bot.resolve_member(
+            interaction.guild,
+            self.member_input.value,
         )
 
         if member is None:
@@ -2167,10 +2050,7 @@ class VouchMemberModal(
                 ephemeral=True,
             )
 
-        if (
-            member.id
-            == interaction.user.id
-        ):
+        if member.id == interaction.user.id:
 
             return await interaction.followup.send(
                 "You cannot vouch yourself.",
@@ -2191,9 +2071,7 @@ class VouchMemberModal(
 # VOUCH TYPE VIEW
 # =========================================================
 
-class VouchTypeView(
-    SafeView
-):
+class VouchTypeView(SafeView):
 
     def __init__(
         self,
@@ -2249,9 +2127,7 @@ class VouchTypeView(
 # VOUCH REASON MODAL
 # =========================================================
 
-class VouchReasonModal(
-    SafeModal
-):
+class VouchReasonModal(SafeModal):
 
     reason = discord.ui.TextInput(
         label="Reason",
@@ -2294,9 +2170,7 @@ class VouchReasonModal(
 # LEADERBOARD VIEW
 # =========================================================
 
-class VouchLeaderboardView(
-    SafeView
-):
+class VouchLeaderboardView(SafeView):
 
     def __init__(
         self,
@@ -2316,18 +2190,14 @@ class VouchLeaderboardView(
 
         self.refresh_buttons()
 
-    def refresh_buttons(
-        self,
-    ):
+    def refresh_buttons(self):
 
         self.clear_items()
 
         previous = discord.ui.Button(
             label="<",
             style=discord.ButtonStyle.secondary,
-            disabled=(
-                self.page <= 0
-            ),
+            disabled=self.page <= 0,
         )
 
         next_button = discord.ui.Button(
@@ -2351,15 +2221,12 @@ class VouchLeaderboardView(
             next_button
         )
 
-    async def count_members(
-        self,
-    ) -> int:
+    async def count_members(self) -> int:
 
         return len(
             [
                 member
-                for member
-                in self.guild.members
+                for member in self.guild.members
                 if not member.bot
             ]
         )
@@ -2396,17 +2263,14 @@ class VouchLeaderboardView(
 
         valid_ids = {
             member.id
-            for member
-            in self.guild.members
+            for member in self.guild.members
             if not member.bot
         }
 
         rows = [
             row
             for row in rows
-            if int(
-                row["user_id"]
-            )
+            if int(row["user_id"])
             in valid_ids
         ]
 
@@ -2438,14 +2302,12 @@ class VouchLeaderboardView(
                 )
             )
 
-        embed.description = (
-            "\n".join(lines)
+        embed.description = "\n".join(
+            lines
         )
 
         embed.set_footer(
-            text=(
-                f"Page {self.page + 1}"
-            )
+            text=f"Page {self.page + 1}"
         )
 
         return embed
@@ -2464,9 +2326,7 @@ class VouchLeaderboardView(
 
         self.refresh_buttons()
 
-        embed = (
-            await self.build_embed()
-        )
+        embed = await self.build_embed()
 
         await interaction.edit_original_response(
             embed=embed,
@@ -2480,15 +2340,11 @@ class VouchLeaderboardView(
 
         await interaction.response.defer()
 
-        member_count = (
-            await self.count_members()
-        )
+        member_count = await self.count_members()
 
         max_page = max(
             0,
-            (
-                member_count - 1
-            )
+            (member_count - 1)
             // self.per_page,
         )
 
@@ -2499,9 +2355,7 @@ class VouchLeaderboardView(
 
         self.refresh_buttons()
 
-        embed = (
-            await self.build_embed()
-        )
+        embed = await self.build_embed()
 
         await interaction.edit_original_response(
             embed=embed,
@@ -2522,9 +2376,7 @@ def make_giveaway_embed(
 
     embed = discord.Embed(
         title="🎉 Giveaway",
-        description=(
-            f"**Prize:** {prize}"
-        ),
+        description=f"**Prize:** {prize}",
     )
 
     embed.add_field(
@@ -2556,9 +2408,7 @@ def make_giveaway_embed(
 # GIVEAWAY JOIN VIEW
 # =========================================================
 
-class GiveawayJoinView(
-    SafeView
-):
+class GiveawayJoinView(SafeView):
 
     def __init__(
         self,
@@ -2601,7 +2451,6 @@ class GiveawayJoinView(
                 ephemeral=True,
             )
 
-        # Immediate acknowledgement.
         await interaction.response.defer(
             ephemeral=True
         )
@@ -2631,9 +2480,7 @@ class GiveawayJoinView(
                     ephemeral=True,
                 )
 
-            if int(
-                row["end_at"]
-            ) <= now_timestamp():
+            if int(row["end_at"]) <= now_timestamp():
 
                 await self.bot.finish_giveaway(
                     self.giveaway_id
@@ -2687,14 +2534,14 @@ class GiveawayJoinView(
 
 
 # =========================================================
-# BOT INSTANCE
+# BOT
 # =========================================================
 
 bot = GiveawayTrustBot()
 
 
 # =========================================================
-# GIVEAWAY GROUP
+# GIVEAWAY COMMAND GROUP
 # =========================================================
 
 giveaway_group = app_commands.Group(
@@ -2863,9 +2710,7 @@ async def botstats_command(
 
         embed.add_field(
             name="Latency",
-            value=(
-                f"{round(bot.latency * 1000)} ms"
-            ),
+            value=f"{round(bot.latency * 1000)} ms",
         )
 
         await interaction.followup.send(
@@ -3093,10 +2938,8 @@ async def tempban_command(
         )
 
     if (
-        member.top_role
-        >= interaction.user.top_role
-        and
-        interaction.user.id
+        member.top_role >= interaction.user.top_role
+        and interaction.user.id
         != interaction.guild.owner_id
     ):
 
@@ -3306,10 +3149,8 @@ async def giveaway_create(
             interaction.user,
         )
 
-        message = (
-            await interaction.channel.send(
-                embed=embed
-            )
+        message = await interaction.channel.send(
+            embed=embed
         )
 
         giveaway_id = (
@@ -3404,8 +3245,7 @@ async def giveaway_end(
 
         if (
             row is None
-            or
-            int(row["guild_id"])
+            or int(row["guild_id"])
             != interaction.guild.id
         ):
 
@@ -3421,19 +3261,16 @@ async def giveaway_end(
                 ephemeral=True,
             )
 
-        success = (
-            await bot.finish_giveaway(
-                giveaway_id,
-                forced=True,
-            )
+        success = await bot.finish_giveaway(
+            giveaway_id,
+            forced=True,
         )
 
         await interaction.followup.send(
             (
                 "Giveaway ended."
                 if success
-                else
-                "I could not end the giveaway."
+                else "I could not end the giveaway."
             ),
             ephemeral=True,
         )
@@ -3451,7 +3288,7 @@ async def giveaway_end(
 
 
 # =========================================================
-# APPLICATION COMMAND ERROR
+# APPLICATION COMMAND ERRORS
 # =========================================================
 
 @bot.tree.error
@@ -3524,7 +3361,6 @@ async def main():
         try:
 
             if not bot.is_closed():
-
                 await bot.close()
 
         except Exception:
@@ -3533,10 +3369,6 @@ async def main():
                 "Error while closing bot"
             )
 
-
-# =========================================================
-# RUN
-# =========================================================
 
 if __name__ == "__main__":
 
