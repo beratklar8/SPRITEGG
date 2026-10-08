@@ -1,81 +1,105 @@
 import asyncio
-import inspect
 import io
 import json
 import logging
 import os
 import random
 import re
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
-import aiosqlite
 import discord
 from aiohttp import web
 from discord import app_commands
 from discord.ext import tasks
-from dotenv import load_dotenv
-from groq import Groq
-from PIL import Image, ImageDraw, ImageFont
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args, **kwargs):
+        return None
+
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    Image = ImageDraw = ImageFont = None
 
 from database import DatabaseController
 
 
 load_dotenv()
 
+
+# ============================================================
+# LOGGING
+# ============================================================
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("vouch-bot")
+
+logger = logging.getLogger("bot")
 
 
 # ============================================================
-# CONFIG
+# ENVIRONMENT
 # ============================================================
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv(
     "GROQ_MODEL",
     "llama-3.3-70b-versatile",
-).strip()
+)
 
 BOT_OWNER_ID = int(
-    os.getenv("BOT_OWNER_ID", "0") or "0"
+    os.getenv("BOT_OWNER_ID", "0") or 0
 )
 
 PORT = int(
-    os.getenv("PORT", "10000") or "10000"
+    os.getenv("PORT", "10000") or 10000
+)
+
+_default_db_dir = (
+    "/data"
+    if os.path.isdir("/data")
+    else os.getcwd()
 )
 
 DATABASE_PATH = os.getenv(
     "DATABASE_PATH",
-    "",
-).strip()
-
-if not DATABASE_PATH:
-    DATABASE_PATH = os.path.join(
-        os.getcwd(),
+    os.path.join(
+        _default_db_dir,
         "bot_database.db",
-    )
+    ),
+)
 
 
-# Existing Discord role IDs
+# ============================================================
+# TRUST CONFIG
+# ============================================================
+
 TRADER_ROLE_ID = 1529114068412141639
 TRUSTED_TRADER_ROLE_ID = 1529114203204489277
 
 TRADER_THRESHOLD = 25
 TRUSTED_TRADER_THRESHOLD = 50
+
 STARTING_TRUST = 0
 
 
 # ============================================================
-# INTENTS
+# DISCORD INTENTS
 # ============================================================
 
 intents = discord.Intents.default()
+
 intents.guilds = True
 intents.members = True
 intents.message_content = True
@@ -86,55 +110,79 @@ intents.message_content = True
 # ============================================================
 
 def now_ts() -> float:
-    return time.time()
+    return datetime.now(
+        timezone.utc
+    ).timestamp()
 
 
-def discord_time(timestamp: float) -> str:
-    return discord.utils.format_dt(
-        datetime.fromtimestamp(
-            timestamp,
-            tz=timezone.utc,
-        ),
-        style="F",
+def discord_time(
+    timestamp: float,
+    style: str = "R",
+) -> str:
+    return (
+        f"<t:{int(timestamp)}:{style}>"
     )
 
 
 def clamp(
     value: int,
-    low: int = 0,
-    high: int = 100,
+    minimum: int = 0,
+    maximum: int = 100,
 ) -> int:
     return max(
-        low,
-        min(high, int(value)),
+        minimum,
+        min(
+            maximum,
+            int(value),
+        ),
     )
 
 
 def parse_duration(
     value: str,
 ) -> Optional[int]:
-    value = value.strip().lower()
 
-    match = re.fullmatch(
-        r"(\d+)\s*([smhd]?)",
-        value,
+    text = (
+        value
+        .strip()
+        .lower()
+        .replace(" ", "")
     )
 
-    if not match:
+    if not text:
         return None
 
-    amount = int(match.group(1))
-    unit = match.group(2)
+    matches = re.findall(
+        r"(\d+)(s|m|h|d|w)",
+        text,
+    )
 
-    multiplier = {
-        "": 60,
+    if not matches:
+        return None
+
+    rebuilt = "".join(
+        f"{number}{unit}"
+        for number, unit
+        in matches
+    )
+
+    if rebuilt != text:
+        return None
+
+    multipliers = {
         "s": 1,
         "m": 60,
         "h": 3600,
         "d": 86400,
-    }[unit]
+        "w": 604800,
+    }
 
-    seconds = amount * multiplier
+    seconds = sum(
+        int(number)
+        * multipliers[unit]
+        for number, unit
+        in matches
+    )
 
     if seconds <= 0:
         return None
@@ -142,30 +190,106 @@ def parse_duration(
     return seconds
 
 
+def parse_color(
+    value: Optional[str],
+) -> discord.Color:
+
+    if not value:
+        return discord.Color.blurple()
+
+    raw = (
+        value
+        .strip()
+        .lower()
+        .lstrip("#")
+    )
+
+    try:
+        return discord.Color(
+            int(raw, 16)
+        )
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return discord.Color.blurple()
+
+
+def owner_only():
+
+    async def predicate(
+        interaction: discord.Interaction,
+    ) -> bool:
+
+        return (
+            BOT_OWNER_ID != 0
+            and interaction.user.id
+            == BOT_OWNER_ID
+        )
+
+    return app_commands.check(
+        predicate
+    )
+
+
+# ============================================================
+# INTERACTION HELPERS
+# ============================================================
+
 async def acknowledge(
     interaction: discord.Interaction,
+    *,
     ephemeral: bool = True,
 ) -> bool:
     """
     Acknowledge an interaction immediately.
-    Returns True if this function actually deferred the interaction.
+
+    thinking=True is intentional. This creates a real deferred
+    channel-message response that can safely be completed with
+    interaction.followup afterwards.
     """
+
     try:
-        if not interaction.response.is_done():
-            await interaction.response.defer(
-                ephemeral=ephemeral
-            )
-            return True
+
+        if interaction.response.is_done():
+            return False
+
+        await interaction.response.defer(
+            ephemeral=ephemeral,
+            thinking=True,
+        )
+
+        return True
+
+    except discord.InteractionResponded:
 
         return False
 
-    except discord.InteractionResponded:
+    except discord.NotFound:
+
+        logger.warning(
+            "Interaction expired before acknowledgement: %s",
+            interaction.id,
+        )
+
         return False
 
     except discord.HTTPException:
+
         logger.exception(
-            "Failed to defer interaction."
+            "Discord rejected interaction acknowledgement: %s",
+            interaction.id,
         )
+
+        return False
+
+    except Exception:
+
+        logger.exception(
+            "Unexpected acknowledgement error: %s",
+            interaction.id,
+        )
+
         return False
 
 
@@ -179,11 +303,14 @@ async def send_interaction_message(
     ephemeral: bool = True,
 ):
     """
-    Safely send a response regardless of whether the interaction
-    has already been acknowledged.
+    Safely send an interaction response regardless of whether
+    the initial response has already been used.
     """
+
     try:
+
         if interaction.response.is_done():
+
             return await interaction.followup.send(
                 content=content,
                 embed=embed,
@@ -201,77 +328,42 @@ async def send_interaction_message(
         )
 
     except discord.InteractionResponded:
-        return await interaction.followup.send(
-            content=content,
-            embed=embed,
-            view=view,
-            file=file,
-            ephemeral=ephemeral,
+
+        try:
+
+            return await interaction.followup.send(
+                content=content,
+                embed=embed,
+                view=view,
+                file=file,
+                ephemeral=ephemeral,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Failed to send interaction follow-up."
+            )
+
+    except discord.HTTPException:
+
+        logger.exception(
+            "Discord rejected interaction response: %s",
+            interaction.id,
         )
 
+    except Exception:
 
-def owner_only():
-    async def predicate(
-        interaction: discord.Interaction,
-    ) -> bool:
-        if interaction.user.id == BOT_OWNER_ID:
-            return True
-
-        if (
-            interaction.guild
-            and interaction.user.id
-            == interaction.guild.owner_id
-        ):
-            return True
-
-        raise app_commands.CheckFailure(
-            "Owner only"
+        logger.exception(
+            "Unexpected interaction response error: %s",
+            interaction.id,
         )
 
-    return app_commands.check(predicate)
-
-
-async def ensure_database_ready(
-    db: DatabaseController,
-) -> None:
-    """
-    Supports multiple DatabaseController initializer names so the
-    bot does not crash just because the database class uses a
-    different initialization method.
-    """
-    method_names = (
-        "initialize_database",
-        "initialize",
-        "init_db",
-        "setup",
-        "create_tables",
-    )
-
-    for name in method_names:
-        method = getattr(db, name, None)
-
-        if method is None:
-            continue
-
-        result = method()
-
-        if inspect.isawaitable(result):
-            await result
-
-        logger.info(
-            "Database initialized using %s().",
-            name,
-        )
-        return
-
-    logger.warning(
-        "No known database initializer found. "
-        "Assuming DatabaseController initializes itself."
-    )
+    return None
 
 
 # ============================================================
-# SAFE UI
+# SAFE DISCORD UI
 # ============================================================
 
 class SafeView(discord.ui.View):
@@ -281,25 +373,23 @@ class SafeView(discord.ui.View):
         interaction: discord.Interaction,
         error: Exception,
         item: discord.ui.Item,
-    ) -> None:
+    ):
 
-        logger.exception(
-            "UI callback failed: %s",
-            type(item).__name__,
-            exc_info=error,
+        logger.error(
+            "View error in %s",
+            type(self).__name__,
+            exc_info=(
+                type(error),
+                error,
+                error.__traceback__,
+            ),
         )
 
-        try:
-            await send_interaction_message(
-                interaction,
-                "❌ Something went wrong. Please try again.",
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Could not send UI error response."
-            )
+        await send_interaction_message(
+            interaction,
+            "Something went wrong while processing that action.",
+            ephemeral=True,
+        )
 
 
 class SafeModal(discord.ui.Modal):
@@ -308,24 +398,23 @@ class SafeModal(discord.ui.Modal):
         self,
         interaction: discord.Interaction,
         error: Exception,
-    ) -> None:
+    ):
 
-        logger.exception(
-            "Modal callback failed.",
-            exc_info=error,
+        logger.error(
+            "Modal error in %s",
+            type(self).__name__,
+            exc_info=(
+                type(error),
+                error,
+                error.__traceback__,
+            ),
         )
 
-        try:
-            await send_interaction_message(
-                interaction,
-                "❌ Something went wrong. Please try again.",
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Could not send modal error response."
-            )
+        await send_interaction_message(
+            interaction,
+            "Something went wrong while processing that form.",
+            ephemeral=True,
+        )
 
 
 # ============================================================
@@ -335,8 +424,13 @@ class SafeModal(discord.ui.Modal):
 class VouchBot(discord.Client):
 
     def __init__(self):
+
         super().__init__(
-            intents=intents
+            intents=intents,
+            status=discord.Status.online,
+            activity=discord.Game(
+                "Trust & Giveaways"
+            ),
         )
 
         self.tree = app_commands.CommandTree(
@@ -351,188 +445,90 @@ class VouchBot(discord.Client):
             Groq(
                 api_key=GROQ_API_KEY
             )
-            if GROQ_API_KEY
+            if (
+                Groq is not None
+                and GROQ_API_KEY
+            )
             else None
         )
 
         self.health_runner = None
         self.health_site = None
-        self.ready_once = False
-        self.db_closed = False
-
-        self.giveaway_group = app_commands.Group(
-            name="giveaway",
-            description="Giveaway commands",
-        )
+        self._ready_once = False
 
     # ========================================================
-    # LIFECYCLE
+    # STARTUP
     # ========================================================
 
     async def setup_hook(self):
-        await ensure_database_ready(self.db)
 
-        # Migrate old untouched default-25 users to 0.
-        try:
-            await self.db.execute(
-                """
-                UPDATE user_vouch_network
-                SET trust_score = 0
-                WHERE trust_score = 25
-                  AND vouches_given = 0
-                  AND vouch_positive = 0
-                  AND vouch_negative = 0
-                """
-            )
-        except Exception:
-            logger.exception(
-                "Trust score migration failed."
-            )
+        await self.db.initialize_database()
 
-        # Persistent trust panel.
+        await self.db.execute(
+            """
+            UPDATE user_vouch_network
+            SET trust_score = ?
+            WHERE trust_score = 25
+              AND vouches_given = 0
+              AND vouch_positive = 0
+              AND vouch_negative = 0
+            """,
+            (STARTING_TRUST,),
+        )
+
         self.add_view(
             TrustPanelView(self)
         )
 
-        # Recover giveaways that were interrupted.
+        await self.recover_giveaways()
+
         try:
-            await self.db.execute(
-                """
-                UPDATE giveaway_system
-                SET
-                    status = 'ACTIVE',
-                    processing_started_at = 0
-                WHERE status = 'PROCESSING'
-                """
-            )
-        except Exception:
-            logger.exception(
-                "Giveaway recovery failed."
-            )
 
-        # Recover active giveaway buttons.
-        try:
-            giveaway_rows = await self.db.fetchall(
-                """
-                SELECT message_id
-                FROM giveaway_system
-                WHERE status = 'ACTIVE'
-                """
+            synced = await self.tree.sync()
+
+            logger.info(
+                "Synced %s application commands.",
+                len(synced),
             )
-
-            for row in giveaway_rows:
-                message_id = int(row[0])
-
-                self.add_view(
-                    GiveawayJoinView(
-                        self,
-                        message_id,
-                    ),
-                    message_id=message_id,
-                )
 
         except Exception:
+
             logger.exception(
-                "Giveaway persistent views could not be restored."
+                "Failed to sync application commands."
             )
 
-        # Register giveaway group commands.
-        try:
-            self.giveaway_group.add_command(
-                self.giveaway_create
-            )
-        except app_commands.CommandAlreadyRegistered:
-            pass
+        self.giveaway_loop.start()
+        self.maintenance_loop.start()
 
-        try:
-            self.giveaway_group.add_command(
-                self.giveaway_end
-            )
-        except app_commands.CommandAlreadyRegistered:
-            pass
-
-        existing_commands = self.tree.get_commands()
-
-        if self.giveaway_group not in existing_commands:
-            self.tree.add_command(
-                self.giveaway_group
-            )
-
-        # Sync commands.
-        await self.tree.sync()
-
-        # Start background loops.
-        if not self.giveaway_loop.is_running():
-            self.giveaway_loop.start()
-
-        if not self.temp_ban_loop.is_running():
-            self.temp_ban_loop.start()
-
-        # Start Render health endpoint.
         await self.start_health_server()
 
-    async def on_ready(
-        self,
-    ):
+    async def on_ready(self):
+
         logger.info(
             "Logged in as %s (%s)",
             self.user,
-            self.user.id if self.user else "?",
+            self.user.id
+            if self.user
+            else "?",
         )
 
-        if not self.ready_once:
-            self.ready_once = True
+        if not self._ready_once:
 
-            for guild in self.guilds:
-                try:
-                    await self.ensure_guild_trust_users(
-                        guild
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to initialize Trust users "
-                        "for guild %s",
-                        guild.id,
-                    )
+            self._ready_once = True
 
-        logger.info(
-            "Connected to %d guild(s).",
-            len(self.guilds),
-        )
+            await self.ensure_all_members()
 
     async def close(self):
-        for loop in (
-            self.giveaway_loop,
-            self.temp_ban_loop,
-        ):
-            try:
-                if loop.is_running():
-                    loop.cancel()
-            except Exception:
-                logger.exception(
-                    "Could not stop background loop."
-                )
 
-        if self.health_runner is not None:
-            try:
-                await self.health_runner.cleanup()
-            except Exception:
-                logger.exception(
-                    "Health server cleanup failed."
-                )
+        if self.giveaway_loop.is_running():
+            self.giveaway_loop.cancel()
 
-            self.health_runner = None
-            self.health_site = None
+        if self.maintenance_loop.is_running():
+            self.maintenance_loop.cancel()
 
-        if not self.db_closed:
-            try:
-                await self.db.close()
-            except Exception:
-                logger.exception(
-                    "Database close failed."
-                )
-            finally:
-                self.db_closed = True
+        await self.stop_health_server()
+
+        await self.db.close()
 
         await super().close()
 
@@ -543,15 +539,11 @@ class VouchBot(discord.Client):
     async def start_health_server(
         self,
     ):
+
         if self.health_runner is not None:
             return
 
         app = web.Application()
-
-        app.router.add_get(
-            "/",
-            self.health,
-        )
 
         app.router.add_get(
             "/health",
@@ -560,7 +552,7 @@ class VouchBot(discord.Client):
 
         app.router.add_get(
             "/api/status",
-            self.status,
+            self.api_status,
         )
 
         self.health_runner = web.AppRunner(
@@ -578,56 +570,66 @@ class VouchBot(discord.Client):
         await self.health_site.start()
 
         logger.info(
-            "Health server running on port %s",
+            "Health server listening on port %s",
             PORT,
         )
+
+    async def stop_health_server(self):
+
+        if self.health_runner is not None:
+
+            await self.health_runner.cleanup()
+
+            self.health_runner = None
+            self.health_site = None
 
     async def health(
         self,
         request: web.Request,
-    ) -> web.Response:
+    ):
+
         return web.json_response(
             {
-                "status": "ok",
-                "guilds": len(self.guilds),
+                "status": "ok"
             }
         )
 
-    async def status(
+    async def api_status(
         self,
         request: web.Request,
-    ) -> web.Response:
+    ):
+
         return web.json_response(
             {
-                "status": "online",
-                "guilds": len(self.guilds),
+                "status": "ok",
+                "ready": self.is_ready(),
+                "guilds": len(
+                    self.guilds
+                ),
                 "latency_ms": round(
                     self.latency * 1000,
                     2,
                 ),
                 "database": (
-                    getattr(
-                        self.db,
-                        "connection",
-                        None,
-                    )
+                    self.db.connection
                     is not None
                 ),
             }
         )
 
     # ========================================================
-    # TRUST
+    # USER / TRUST DATA
     # ========================================================
 
-    async def ensure_trust_user(
+    async def ensure_user(
         self,
         guild_id: int,
         user_id: int,
     ):
+
         await self.db.execute(
             """
-            INSERT OR IGNORE INTO user_vouch_network (
+            INSERT INTO user_vouch_network (
                 guild_id,
                 user_id,
                 trust_score,
@@ -635,7 +637,56 @@ class VouchBot(discord.Client):
                 vouch_positive,
                 vouch_negative
             )
-            VALUES (?, ?, 0, 0, 0, 0)
+            VALUES (
+                ?,
+                ?,
+                ?,
+                0,
+                0,
+                0
+            )
+            ON CONFLICT(
+                guild_id,
+                user_id
+            )
+            DO NOTHING
+            """,
+            (
+                guild_id,
+                user_id,
+                STARTING_TRUST,
+            ),
+        )
+
+        await self.db.execute(
+            """
+            INSERT INTO user_activity (
+                guild_id,
+                user_id,
+                message_count,
+                daily_message_count,
+                week_message_count,
+                month_message_count,
+                last_daily_date,
+                last_weekly_date,
+                last_monthly_date
+            )
+            VALUES (
+                ?,
+                ?,
+                0,
+                0,
+                0,
+                0,
+                NULL,
+                NULL,
+                NULL
+            )
+            ON CONFLICT(
+                guild_id,
+                user_id
+            )
+            DO NOTHING
             """,
             (
                 guild_id,
@@ -643,46 +694,161 @@ class VouchBot(discord.Client):
             ),
         )
 
-    async def ensure_guild_trust_users(
-        self,
-        guild: discord.Guild,
-    ):
-        members = [
-            member
-            for member in guild.members
-            if not member.bot
-        ]
+    async def ensure_all_members(self):
 
-        if not members:
-            return
+        for guild in self.guilds:
 
-        await self.db.executemany(
-            """
-            INSERT OR IGNORE INTO user_vouch_network (
-                guild_id,
-                user_id,
-                trust_score,
-                vouches_given,
-                vouch_positive,
-                vouch_negative
+            members = [
+                member
+                for member in guild.members
+                if not member.bot
+            ]
+
+            if not members:
+                continue
+
+            trust_rows = [
+                (
+                    guild.id,
+                    member.id,
+                    STARTING_TRUST,
+                )
+                for member in members
+            ]
+
+            await self.db.executemany(
+                """
+                INSERT INTO user_vouch_network (
+                    guild_id,
+                    user_id,
+                    trust_score,
+                    vouches_given,
+                    vouch_positive,
+                    vouch_negative
+                )
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    0,
+                    0,
+                    0
+                )
+                ON CONFLICT(
+                    guild_id,
+                    user_id
+                )
+                DO NOTHING
+                """,
+                trust_rows,
             )
-            VALUES (?, ?, 0, 0, 0, 0)
-            """,
-            [
+
+            activity_rows = [
                 (
                     guild.id,
                     member.id,
                 )
                 for member in members
-            ],
+            ]
+
+            await self.db.executemany(
+                """
+                INSERT INTO user_activity (
+                    guild_id,
+                    user_id,
+                    message_count,
+                    daily_message_count,
+                    week_message_count,
+                    month_message_count,
+                    last_daily_date,
+                    last_weekly_date,
+                    last_monthly_date
+                )
+                VALUES (
+                    ?,
+                    ?,
+                    0,
+                    0,
+                    0,
+                    0,
+                    NULL,
+                    NULL,
+                    NULL
+                )
+                ON CONFLICT(
+                    guild_id,
+                    user_id
+                )
+                DO NOTHING
+                """,
+                activity_rows,
+            )
+
+    async def resolve_member(
+        self,
+        guild: discord.Guild,
+        value: str,
+    ) -> Optional[discord.Member]:
+
+        value = value.strip()
+
+        mention = re.fullmatch(
+            r"<@!?(\d+)>",
+            value,
         )
 
-    async def get_trust_profile(
+        if mention:
+            value = mention.group(1)
+
+        if value.isdigit():
+
+            member_id = int(value)
+
+            member = guild.get_member(
+                member_id
+            )
+
+            if member:
+                return member
+
+            try:
+
+                return await guild.fetch_member(
+                    member_id
+                )
+
+            except discord.HTTPException:
+
+                return None
+
+        lowered = value.casefold()
+
+        for member in guild.members:
+
+            if member.bot:
+                continue
+
+            if (
+                member.name.casefold()
+                == lowered
+            ):
+                return member
+
+            if (
+                member.display_name.casefold()
+                == lowered
+            ):
+                return member
+
+        return None
+
+    async def get_trust(
         self,
         guild_id: int,
         user_id: int,
     ):
-        await self.ensure_trust_user(
+
+        await self.ensure_user(
             guild_id,
             user_id,
         )
@@ -704,38 +870,391 @@ class VouchBot(discord.Client):
             ),
         )
 
-    @staticmethod
-    def trust_bar(
+    async def update_trust_roles(
+        self,
+        member: discord.Member,
         score: int,
-    ) -> str:
-        score = clamp(score)
+    ):
 
-        filled = round(
-            score / 10
+        trader_role = member.guild.get_role(
+            TRADER_ROLE_ID
+        )
+
+        trusted_role = member.guild.get_role(
+            TRUSTED_TRADER_ROLE_ID
+        )
+
+        if (
+            trader_role is None
+            and trusted_role is None
+        ):
+            return
+
+        try:
+
+            if trusted_role:
+
+                if score >= TRUSTED_TRADER_THRESHOLD:
+
+                    if trusted_role not in member.roles:
+
+                        await member.add_roles(
+                            trusted_role,
+                            reason=(
+                                "Trust score reached "
+                                "trusted threshold"
+                            ),
+                        )
+
+                elif trusted_role in member.roles:
+
+                    await member.remove_roles(
+                        trusted_role,
+                        reason=(
+                            "Trust score dropped "
+                            "below trusted threshold"
+                        ),
+                    )
+
+            if trader_role:
+
+                if score >= TRADER_THRESHOLD:
+
+                    if trader_role not in member.roles:
+
+                        await member.add_roles(
+                            trader_role,
+                            reason=(
+                                "Trust score reached "
+                                "trader threshold"
+                            ),
+                        )
+
+                elif trader_role in member.roles:
+
+                    await member.remove_roles(
+                        trader_role,
+                        reason=(
+                            "Trust score dropped "
+                            "below trader threshold"
+                        ),
+                    )
+
+        except discord.Forbidden:
+
+            logger.warning(
+                "Cannot update trust roles for %s",
+                member,
+            )
+
+        except discord.HTTPException:
+
+            logger.exception(
+                "Failed to update trust roles for %s",
+                member,
+            )
+
+    async def process_vouch(
+        self,
+        guild: discord.Guild,
+        giver: discord.Member,
+        target: discord.Member,
+        vouch_type: str,
+        reason: str,
+    ):
+
+        if giver.id == target.id:
+
+            return (
+                False,
+                "You cannot vouch yourself.",
+                None,
+            )
+
+        if giver.bot or target.bot:
+
+            return (
+                False,
+                "Bots cannot participate in the vouch system.",
+                None,
+            )
+
+        if vouch_type not in {
+            "POSITIVE",
+            "NEGATIVE",
+        }:
+
+            return (
+                False,
+                "Invalid vouch type.",
+                None,
+            )
+
+        reason = (
+            reason
+            or "No reason provided."
+        ).strip()[:1000]
+
+        await self.ensure_user(
+            guild.id,
+            giver.id,
+        )
+
+        await self.ensure_user(
+            guild.id,
+            target.id,
+        )
+
+        existing = await self.db.fetchone(
+            """
+            SELECT vouch_type
+            FROM vouch_history
+            WHERE guild_id = ?
+              AND target_id = ?
+              AND giver_id = ?
+            """,
+            (
+                guild.id,
+                target.id,
+                giver.id,
+            ),
+        )
+
+        if existing:
+
+            return (
+                False,
+                "You have already vouched this user.",
+                None,
+            )
+
+        delta = (
+            1
+            if vouch_type == "POSITIVE"
+            else -1
+        )
+
+        async with self.db.transaction() as conn:
+
+            await conn.execute(
+                """
+                INSERT INTO vouch_history (
+                    guild_id,
+                    target_id,
+                    giver_id,
+                    vouch_type,
+                    reason,
+                    timestamp
+                )
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?
+                )
+                """,
+                (
+                    guild.id,
+                    target.id,
+                    giver.id,
+                    vouch_type,
+                    reason,
+                    now_ts(),
+                ),
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO user_vouch_network (
+                    guild_id,
+                    user_id,
+                    trust_score,
+                    vouches_given,
+                    vouch_positive,
+                    vouch_negative
+                )
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    0,
+                    ?,
+                    ?
+                )
+                ON CONFLICT(
+                    guild_id,
+                    user_id
+                )
+                DO UPDATE SET
+                    trust_score = MIN(
+                        100,
+                        MAX(
+                            0,
+                            user_vouch_network.trust_score + ?
+                        )
+                    ),
+                    vouch_positive =
+                        user_vouch_network.vouch_positive + ?,
+                    vouch_negative =
+                        user_vouch_network.vouch_negative + ?
+                """,
+                (
+                    guild.id,
+                    target.id,
+                    clamp(
+                        STARTING_TRUST + delta
+                    ),
+                    1
+                    if vouch_type == "POSITIVE"
+                    else 0,
+                    1
+                    if vouch_type == "NEGATIVE"
+                    else 0,
+                    delta,
+                    1
+                    if vouch_type == "POSITIVE"
+                    else 0,
+                    1
+                    if vouch_type == "NEGATIVE"
+                    else 0,
+                ),
+            )
+
+            await conn.execute(
+                """
+                UPDATE user_vouch_network
+                SET vouches_given =
+                    vouches_given + 1
+                WHERE guild_id = ?
+                  AND user_id = ?
+                """,
+                (
+                    guild.id,
+                    giver.id,
+                ),
+            )
+
+        row = await self.db.fetchone(
+            """
+            SELECT trust_score
+            FROM user_vouch_network
+            WHERE guild_id = ?
+              AND user_id = ?
+            """,
+            (
+                guild.id,
+                target.id,
+            ),
+        )
+
+        score = (
+            int(row[0])
+            if row
+            else STARTING_TRUST
+        )
+
+        await self.update_trust_roles(
+            target,
+            score,
+        )
+
+        await self.log_transaction(
+            guild,
+            giver,
+            target,
+            vouch_type,
+            reason,
+            score,
         )
 
         return (
-            "█" * filled
-            + "░" * (10 - filled)
+            True,
+            "Vouch added successfully.",
+            score,
         )
 
-    async def build_profile_embed(
+    async def log_transaction(
+        self,
+        guild: discord.Guild,
+        giver: discord.Member,
+        target: discord.Member,
+        vouch_type: str,
+        reason: str,
+        score: int,
+    ):
+
+        row = await self.db.fetchone(
+            """
+            SELECT channel_id
+            FROM transaction_log_config
+            WHERE guild_id = ?
+            """,
+            (guild.id,),
+        )
+
+        if not row:
+            return
+
+        channel_id = int(row[0])
+
+        channel = guild.get_channel(
+            channel_id
+        )
+
+        if channel is None:
+
+            try:
+
+                channel = await guild.fetch_channel(
+                    channel_id
+                )
+
+            except discord.HTTPException:
+
+                return
+
+        embed = discord.Embed(
+            title="Trust Transaction",
+            description=(
+                f"**Giver:** {giver.mention}\n"
+                f"**Target:** {target.mention}\n"
+                f"**Type:** `{vouch_type}`\n"
+                f"**Reason:** {reason}\n"
+                f"**New trust score:** `{score}`"
+            ),
+            timestamp=datetime.now(
+                timezone.utc
+            ),
+        )
+
+        try:
+
+            await channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        except discord.HTTPException:
+
+            logger.exception(
+                "Failed to write transaction log."
+            )
+
+    async def make_profile_embed(
         self,
         guild: discord.Guild,
         member: discord.Member,
     ) -> discord.Embed:
 
-        row = await self.get_trust_profile(
+        row = await self.get_trust(
             guild.id,
             member.id,
         )
 
-        if row is None:
-            score = 0
-            given = 0
-            positive = 0
-            negative = 0
-        else:
+        if row:
+
             (
                 score,
                 given,
@@ -746,24 +1265,57 @@ class VouchBot(discord.Client):
                 row,
             )
 
+        else:
+
+            score = (
+                given
+                = positive
+                = negative
+                = 0
+            )
+
+        recent = await self.db.fetchall(
+            """
+            SELECT
+                giver_id,
+                vouch_type,
+                reason,
+                timestamp
+            FROM vouch_history
+            WHERE guild_id = ?
+              AND target_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 5
+            """,
+            (
+                guild.id,
+                member.id,
+            ),
+        )
+
         if score >= TRUSTED_TRADER_THRESHOLD:
-            rank = f"<@&{TRUSTED_TRADER_ROLE_ID}>"
-            color = discord.Color.gold()
+
+            rank = "Trusted Trader"
 
         elif score >= TRADER_THRESHOLD:
-            rank = f"<@&{TRADER_ROLE_ID}>"
-            color = discord.Color.green()
+
+            rank = "Trader"
 
         else:
-            rank = "No reward role yet"
-            color = discord.Color.blurple()
+
+            rank = "Unranked"
 
         embed = discord.Embed(
             title=(
-                f"Vouch Profile — "
+                f"Trust Profile — "
                 f"{member.display_name}"
             ),
-            color=color,
+            colour=(
+                discord.Colour.green()
+                if score
+                >= TRUSTED_TRADER_THRESHOLD
+                else discord.Colour.blue()
+            ),
         )
 
         embed.set_thumbnail(
@@ -771,690 +1323,209 @@ class VouchBot(discord.Client):
         )
 
         embed.add_field(
-            name="Trust",
-            value=(
-                f"**{score}/100**\n"
-                f"{self.trust_bar(score)}"
-            ),
-            inline=False,
+            name="Trust Score",
+            value=f"`{score}/100`",
+            inline=True,
         )
 
         embed.add_field(
             name="Rank",
-            value=rank,
+            value=f"`{rank}`",
             inline=True,
         )
 
         embed.add_field(
             name="Vouches Given",
-            value=str(given),
+            value=f"`{given}`",
             inline=True,
         )
 
         embed.add_field(
-            name="+Vouch",
-            value=str(positive),
+            name="Positive",
+            value=f"`{positive}`",
             inline=True,
         )
 
         embed.add_field(
-            name="-Vouch",
-            value=str(negative),
+            name="Negative",
+            value=f"`{negative}`",
             inline=True,
         )
 
-        embed.set_footer(
-            text="Everyone starts at 0 Trust"
-        )
+        if recent:
+
+            lines = []
+
+            for (
+                giver_id,
+                v_type,
+                vouch_reason,
+                timestamp,
+            ) in recent:
+
+                sign = (
+                    "+"
+                    if v_type == "POSITIVE"
+                    else "-"
+                )
+
+                giver = guild.get_member(
+                    int(giver_id)
+                )
+
+                giver_name = (
+                    giver.display_name
+                    if giver
+                    else f"User {giver_id}"
+                )
+
+                lines.append(
+                    (
+                        f"{sign} **"
+                        f"{discord.utils.escape_markdown(giver_name)}"
+                        f"** — "
+                        f"{discord.utils.escape_markdown(vouch_reason or 'No reason')} "
+                        f"{discord_time(float(timestamp))}"
+                    )
+                )
+
+            embed.add_field(
+                name="Recent Vouches",
+                value="\n".join(lines)[:1024],
+                inline=False,
+            )
+
+        else:
+
+            embed.add_field(
+                name="Recent Vouches",
+                value="No vouches yet.",
+                inline=False,
+            )
 
         return embed
-
-    async def resolve_member(
-        self,
-        guild: discord.Guild,
-        value: str,
-    ) -> Optional[discord.Member]:
-
-        value = value.strip()
-
-        if not value:
-            return None
-
-        # Correct Discord mention regex.
-        mention = re.fullmatch(
-            r"<@!?(\d+)>",
-            value,
-        )
-
-        if mention:
-            value = mention.group(1)
-
-        if value.isdigit():
-            member = guild.get_member(
-                int(value)
-            )
-
-            if member:
-                return member
-
-            try:
-                return await guild.fetch_member(
-                    int(value)
-                )
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
-            ):
-                return None
-
-        lowered = value.lower()
-
-        for member in guild.members:
-            if member.name.lower() == lowered:
-                return member
-
-            if member.display_name.lower() == lowered:
-                return member
-
-            if (
-                member.global_name
-                and member.global_name.lower()
-                == lowered
-            ):
-                return member
-
-        return None
-
-    async def update_vouch_roles(
-        self,
-        guild: discord.Guild,
-        user_id: int,
-        score: int,
-    ):
-
-        member = guild.get_member(
-            user_id
-        )
-
-        if member is None:
-            try:
-                member = await guild.fetch_member(
-                    user_id
-                )
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
-            ):
-                return
-
-        trader_role = guild.get_role(
-            TRADER_ROLE_ID
-        )
-
-        trusted_role = guild.get_role(
-            TRUSTED_TRADER_ROLE_ID
-        )
-
-        try:
-            # 50+ = Trusted Trader
-            if score >= TRUSTED_TRADER_THRESHOLD:
-                if trusted_role and trusted_role not in member.roles:
-                    await member.add_roles(
-                        trusted_role,
-                        reason="Trust reached 50",
-                    )
-
-                if trader_role and trader_role in member.roles:
-                    await member.remove_roles(
-                        trader_role,
-                        reason="Promoted to Trusted Trader",
-                    )
-
-            # 25+ = Trader
-            elif score >= TRADER_THRESHOLD:
-                if trader_role and trader_role not in member.roles:
-                    await member.add_roles(
-                        trader_role,
-                        reason="Trust reached 25",
-                    )
-
-                if trusted_role and trusted_role in member.roles:
-                    await member.remove_roles(
-                        trusted_role,
-                        reason="Trust below 50",
-                    )
-
-            # Below 25 = no reward role
-            else:
-                if trusted_role and trusted_role in member.roles:
-                    await member.remove_roles(
-                        trusted_role,
-                        reason="Trust below 50",
-                    )
-
-                if trader_role and trader_role in member.roles:
-                    await member.remove_roles(
-                        trader_role,
-                        reason="Trust below 25",
-                    )
-
-        except discord.Forbidden:
-            logger.warning(
-                "Cannot manage Trust roles in guild %s. "
-                "Check Manage Roles and role hierarchy.",
-                guild.id,
-            )
-
-        except discord.HTTPException:
-            logger.exception(
-                "Trust role update failed."
-            )
-
-    async def process_vouch(
-        self,
-        guild: discord.Guild,
-        giver: discord.abc.User,
-        target_id: int,
-        vouch_type: str,
-        reason: str,
-    ):
-
-        if guild is None:
-            return {
-                "ok": False,
-                "message": "❌ Server only.",
-            }
-
-        reason = reason.strip()
-
-        if not reason:
-            return {
-                "ok": False,
-                "message": "❌ Reason is required.",
-            }
-
-        if len(reason) > 200:
-            return {
-                "ok": False,
-                "message": (
-                    "❌ Reason is too long "
-                    "(max 200 characters)."
-                ),
-            }
-
-        if target_id == giver.id:
-            return {
-                "ok": False,
-                "message": "❌ You cannot vouch yourself.",
-            }
-
-        if vouch_type not in {
-            "POSITIVE",
-            "NEGATIVE",
-        }:
-            return {
-                "ok": False,
-                "message": "❌ Invalid vouch type.",
-            }
-
-        target = guild.get_member(
-            target_id
-        )
-
-        if target is None:
-            try:
-                target = await guild.fetch_member(
-                    target_id
-                )
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
-            ):
-                target = None
-
-        if target is None:
-            return {
-                "ok": False,
-                "message": (
-                    "❌ That user is no longer "
-                    "in this server."
-                ),
-            }
-
-        if target.bot:
-            return {
-                "ok": False,
-                "message": "❌ You cannot vouch a bot.",
-            }
-
-        delta = (
-            1
-            if vouch_type == "POSITIVE"
-            else -1
-        )
-
-        timestamp = now_ts()
-
-        try:
-            async with self.db.transaction() as connection:
-
-                # Make sure target exists.
-                await connection.execute(
-                    """
-                    INSERT OR IGNORE INTO user_vouch_network (
-                        guild_id,
-                        user_id,
-                        trust_score,
-                        vouches_given,
-                        vouch_positive,
-                        vouch_negative
-                    )
-                    VALUES (?, ?, 0, 0, 0, 0)
-                    """,
-                    (
-                        guild.id,
-                        target.id,
-                    ),
-                )
-
-                # Make sure giver exists.
-                await connection.execute(
-                    """
-                    INSERT OR IGNORE INTO user_vouch_network (
-                        guild_id,
-                        user_id,
-                        trust_score,
-                        vouches_given,
-                        vouch_positive,
-                        vouch_negative
-                    )
-                    VALUES (?, ?, 0, 0, 0, 0)
-                    """,
-                    (
-                        guild.id,
-                        giver.id,
-                    ),
-                )
-
-                async with connection.execute(
-                    """
-                    SELECT trust_score
-                    FROM user_vouch_network
-                    WHERE guild_id = ?
-                      AND user_id = ?
-                    """,
-                    (
-                        guild.id,
-                        target.id,
-                    ),
-                ) as cursor:
-                    row = await cursor.fetchone()
-
-                old_score = (
-                    int(row[0])
-                    if row
-                    else STARTING_TRUST
-                )
-
-                cursor = await connection.execute(
-                    """
-                    INSERT OR IGNORE INTO vouch_history (
-                        guild_id,
-                        target_id,
-                        giver_id,
-                        vouch_type,
-                        reason,
-                        timestamp
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        guild.id,
-                        target.id,
-                        giver.id,
-                        vouch_type,
-                        reason,
-                        timestamp,
-                    ),
-                )
-
-                # Duplicate vouch.
-                if cursor.rowcount == 0:
-                    return {
-                        "ok": False,
-                        "message": (
-                            "❌ You already vouched this user."
-                        ),
-                    }
-
-                new_score = clamp(
-                    old_score + delta
-                )
-
-                await connection.execute(
-                    """
-                    UPDATE user_vouch_network
-                    SET trust_score = ?
-                    WHERE guild_id = ?
-                      AND user_id = ?
-                    """,
-                    (
-                        new_score,
-                        guild.id,
-                        target.id,
-                    ),
-                )
-
-                await connection.execute(
-                    """
-                    UPDATE user_vouch_network
-                    SET
-                        vouches_given =
-                            vouches_given + 1,
-                        vouch_positive =
-                            vouch_positive + ?,
-                        vouch_negative =
-                            vouch_negative + ?
-                    WHERE guild_id = ?
-                      AND user_id = ?
-                    """,
-                    (
-                        1 if vouch_type == "POSITIVE" else 0,
-                        1 if vouch_type == "NEGATIVE" else 0,
-                        guild.id,
-                        giver.id,
-                    ),
-                )
-
-        except aiosqlite.Error:
-            logger.exception(
-                "Saving vouch failed."
-            )
-
-            return {
-                "ok": False,
-                "message": (
-                    "❌ The vouch could not be saved."
-                ),
-            }
-
-        except Exception:
-            logger.exception(
-                "Unexpected error while saving vouch."
-            )
-
-            return {
-                "ok": False,
-                "message": (
-                    "❌ The vouch could not be saved."
-                ),
-            }
-
-        # Role update and logging happen after the DB commit.
-        try:
-            await self.update_vouch_roles(
-                guild,
-                target.id,
-                new_score,
-            )
-        except Exception:
-            logger.exception(
-                "Role update after vouch failed."
-            )
-
-        try:
-            await self.send_transaction_log(
-                guild,
-                giver,
-                target,
-                vouch_type,
-                reason,
-                old_score,
-                new_score,
-                timestamp,
-            )
-        except Exception:
-            logger.exception(
-                "Transaction log after vouch failed."
-            )
-
-        return {
-            "ok": True,
-            "target": target,
-            "old_score": old_score,
-            "new_score": new_score,
-        }
-
-    async def send_transaction_log(
-        self,
-        guild: discord.Guild,
-        giver: discord.abc.User,
-        target: discord.abc.User,
-        vouch_type: str,
-        reason: str,
-        old_score: int,
-        new_score: int,
-        timestamp: float,
-    ):
-
-        row = await self.db.fetchone(
-            """
-            SELECT channel_id
-            FROM transaction_log_config
-            WHERE guild_id = ?
-            """,
-            (
-                guild.id,
-            ),
-        )
-
-        if row is None:
-            return
-
-        channel = guild.get_channel(
-            int(row[0])
-        )
-
-        if channel is None:
-            try:
-                channel = await guild.fetch_channel(
-                    int(row[0])
-                )
-            except (
-                discord.NotFound,
-                discord.Forbidden,
-                discord.HTTPException,
-            ):
-                return
-
-        if not isinstance(
-            channel,
-            discord.TextChannel,
-        ):
-            return
-
-        label = (
-            "+Vouch"
-            if vouch_type == "POSITIVE"
-            else "-Vouch"
-        )
-
-        embed = discord.Embed(
-            title="Vouch Transaction",
-            color=(
-                discord.Color.green()
-                if vouch_type == "POSITIVE"
-                else discord.Color.red()
-            ),
-            timestamp=datetime.fromtimestamp(
-                timestamp,
-                tz=timezone.utc,
-            ),
-        )
-
-        embed.add_field(
-            name="Vouched by",
-            value=giver.mention,
-            inline=True,
-        )
-
-        embed.add_field(
-            name="Vouched user",
-            value=target.mention,
-            inline=True,
-        )
-
-        embed.add_field(
-            name="Type",
-            value=label,
-            inline=True,
-        )
-
-        embed.add_field(
-            name="Trust",
-            value=(
-                f"{old_score} → **{new_score}**"
-            ),
-            inline=True,
-        )
-
-        embed.add_field(
-            name="Reason",
-            value=reason,
-            inline=False,
-        )
-
-        try:
-            await channel.send(
-                embed=embed
-            )
-        except (
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            logger.exception(
-                "Could not send transaction log."
-            )
 
     # ========================================================
     # LEADERBOARD
     # ========================================================
 
-    @staticmethod
-    def font(
-        size: int,
-        bold: bool = False,
-    ):
-        candidates = [
-            (
-                "/usr/share/fonts/truetype/dejavu/"
-                "DejaVuSans-Bold.ttf"
-                if bold
-                else
-                "/usr/share/fonts/truetype/dejavu/"
-                "DejaVuSans.ttf"
-            ),
-            (
-                "/usr/share/fonts/truetype/liberation2/"
-                "LiberationSans-Bold.ttf"
-                if bold
-                else
-                "/usr/share/fonts/truetype/liberation2/"
-                "LiberationSans-Regular.ttf"
-            ),
-        ]
-
-        for path in candidates:
-            if os.path.exists(path):
-                return ImageFont.truetype(
-                    path,
-                    size,
-                )
-
-        return ImageFont.load_default()
-
-    async def get_leaderboard_entries(
+    async def render_leaderboard(
         self,
         guild: discord.Guild,
+        page: int = 0,
+        per_page: int = 10,
     ):
-        await self.ensure_guild_trust_users(
-            guild
-        )
 
         rows = await self.db.fetchall(
             """
             SELECT
                 user_id,
                 trust_score,
-                vouches_given
+                vouch_positive,
+                vouch_negative
             FROM user_vouch_network
             WHERE guild_id = ?
+            ORDER BY
+                trust_score DESC,
+                user_id ASC
             """,
+            (guild.id,),
+        )
+
+        total_pages = max(
+            1,
             (
-                guild.id,
+                len(rows)
+                + per_page
+                - 1
+            )
+            // per_page,
+        )
+
+        page = max(
+            0,
+            min(
+                page,
+                total_pages - 1,
             ),
         )
 
-        stats = {
-            int(row[0]): {
-                "trust": int(row[1]),
-                "given": int(row[2]),
-            }
-            for row in rows
-        }
+        page_rows = rows[
+            page * per_page:
+            (page + 1) * per_page
+        ]
 
-        entries = []
+        if Image is None:
 
-        for member in guild.members:
-            if member.bot:
-                continue
-
-            entries.append(
-                (
-                    member,
-                    stats.get(
-                        member.id,
-                        {
-                            "trust": STARTING_TRUST,
-                            "given": 0,
-                        },
-                    ),
+            embed = discord.Embed(
+                title=(
+                    f"Trust Leaderboard — "
+                    f"Page {page + 1}/{total_pages}"
                 )
             )
 
-        entries.sort(
-            key=lambda item: (
-                -item[1]["trust"],
-                -item[1]["given"],
-                item[0].display_name.lower(),
-                item[0].id,
+            if page_rows:
+
+                lines = []
+
+                for (
+                    index,
+                    (
+                        user_id,
+                        score,
+                        positive,
+                        negative,
+                    ),
+                ) in enumerate(
+                    page_rows,
+                    start=(
+                        page
+                        * per_page
+                        + 1
+                    ),
+                ):
+
+                    member = guild.get_member(
+                        int(user_id)
+                    )
+
+                    name = (
+                        member.display_name
+                        if member
+                        else f"User {user_id}"
+                    )
+
+                    lines.append(
+                        (
+                            f"**#{index}** "
+                            f"{name} — "
+                            f"`{score}` "
+                            f"(+{positive}/-{negative})"
+                        )
+                    )
+
+                embed.description = (
+                    "\n".join(lines)
+                )
+
+            else:
+
+                embed.description = (
+                    "No trust data yet."
+                )
+
+            return (
+                embed,
+                None,
+                total_pages,
             )
-        )
 
-        return entries
+        # ====================================================
+        # IMAGE LEADERBOARD
+        # ====================================================
 
-    async def avatar_bytes(
-        self,
-        member: discord.Member,
-    ):
-        try:
-            return await member.display_avatar.read()
-        except Exception:
-            return None
-
-    async def make_leaderboard_file(
-        self,
-        guild: discord.Guild,
-        entries,
-        page: int,
-        total_pages: int,
-    ) -> discord.File:
-
-        width = 1400
-        height = 900
+        width = 1200
+        height = 760
 
         image = Image.new(
             "RGB",
@@ -1462,342 +1533,337 @@ class VouchBot(discord.Client):
                 width,
                 height,
             ),
-            (14, 17, 25),
+            (
+                18,
+                18,
+                24,
+            ),
         )
 
         draw = ImageDraw.Draw(
             image
         )
 
-        draw.rounded_rectangle(
+        def load_font(size: int):
+
+            candidates = [
+                (
+                    "/usr/share/fonts/"
+                    "truetype/dejavu/"
+                    "DejaVuSans-Bold.ttf"
+                ),
+                (
+                    "/usr/share/fonts/"
+                    "truetype/dejavu/"
+                    "DejaVuSans.ttf"
+                ),
+            ]
+
+            for path in candidates:
+
+                if not os.path.exists(path):
+                    continue
+
+                try:
+
+                    return ImageFont.truetype(
+                        path,
+                        size,
+                    )
+
+                except Exception:
+                    pass
+
+            return ImageFont.load_default()
+
+        title_font = load_font(42)
+        row_font = load_font(28)
+        small_font = load_font(22)
+
+        draw.text(
             (
+                50,
                 35,
-                30,
-                width - 35,
-                145,
             ),
-            radius=28,
-            fill=(28, 33, 46),
-            outline=(67, 77, 97),
-            width=2,
+            f"Trust Leaderboard — {guild.name}",
+            font=title_font,
+            fill=(
+                245,
+                245,
+                245,
+            ),
         )
 
         draw.text(
             (
-                70,
-                48,
+                50,
+                90,
             ),
-            "VOUCH LEADERBOARD",
-            font=self.font(
-                42,
-                True,
+            f"Page {page + 1}/{total_pages}",
+            font=small_font,
+            fill=(
+                175,
+                175,
+                185,
             ),
-            fill=(245, 247, 250),
         )
 
-        draw.text(
+        y = 150
+
+        for (
+            index,
             (
-                72,
-                103,
+                user_id,
+                score,
+                positive,
+                negative,
             ),
-            (
-                f"{guild.name}"
-                f"  •  Page "
-                f"{page + 1}/{total_pages}"
-            ),
-            font=self.font(
-                22
-            ),
-            fill=(156, 166, 185),
-        )
-
-        start = (
-            page
-            * VouchLeaderboardView.PER_PAGE
-        )
-
-        visible = entries[
-            start:
-            start
-            + VouchLeaderboardView.PER_PAGE
-        ]
-
-        avatars = await asyncio.gather(
-            *(
-                self.avatar_bytes(member)
-                for member, _ in visible
-            ),
-            return_exceptions=True,
-        )
-
-        for offset, (
-            (member, stat),
-            avatar_data,
         ) in enumerate(
-            zip(
-                visible,
-                avatars,
-            )
+            page_rows,
+            start=(
+                page
+                * per_page
+                + 1
+            ),
         ):
-            rank = start + offset + 1
 
-            row_y = (
-                175
-                + offset * 68
+            member = guild.get_member(
+                int(user_id)
             )
 
-            top = rank <= 3
-
-            fill = (
-                (43, 39, 24)
-                if top
-                else
-                (24, 28, 38)
+            name = (
+                member.display_name
+                if member
+                else f"User {user_id}"
             )
 
-            outline = (
-                (174, 145, 62)
-                if top
-                else
-                (49, 56, 72)
-            )
+            if len(name) > 24:
+                name = (
+                    name[:21]
+                    + "..."
+                )
 
             draw.rounded_rectangle(
                 (
                     40,
-                    row_y,
+                    y,
                     width - 40,
-                    row_y + 56,
+                    y + 56,
                 ),
-                radius=17,
-                fill=fill,
-                outline=outline,
-                width=2,
+                radius=14,
+                fill=(
+                    35,
+                    35,
+                    45,
+                ),
             )
 
             draw.text(
                 (
-                    65,
-                    row_y + 12,
+                    60,
+                    y + 10,
                 ),
-                f"#{rank}",
-                font=self.font(
-                    23,
-                    True,
+                f"#{index}",
+                font=row_font,
+                fill=(
+                    255,
+                    255,
+                    255,
                 ),
-                fill=(239, 243, 248),
-            )
-
-            avatar_ok = isinstance(
-                avatar_data,
-                bytes,
-            )
-
-            if avatar_ok:
-                try:
-                    avatar = (
-                        Image.open(
-                            io.BytesIO(
-                                avatar_data
-                            )
-                        )
-                        .convert("RGB")
-                        .resize(
-                            (
-                                40,
-                                40,
-                            )
-                        )
-                    )
-
-                    mask = Image.new(
-                        "L",
-                        (
-                            40,
-                            40,
-                        ),
-                        0,
-                    )
-
-                    ImageDraw.Draw(
-                        mask
-                    ).ellipse(
-                        (
-                            0,
-                            0,
-                            40,
-                            40,
-                        ),
-                        fill=255,
-                    )
-
-                    image.paste(
-                        avatar,
-                        (
-                            135,
-                            row_y + 8,
-                        ),
-                        mask,
-                    )
-
-                except Exception:
-                    avatar_ok = False
-
-            if not avatar_ok:
-                initial = (
-                    (
-                        member.display_name[:1]
-                        or "?"
-                    ).upper()
-                )
-
-                draw.ellipse(
-                    (
-                        135,
-                        row_y + 8,
-                        175,
-                        row_y + 48,
-                    ),
-                    fill=(62, 69, 88),
-                )
-
-                draw.text(
-                    (
-                        147,
-                        row_y + 10,
-                    ),
-                    initial,
-                    font=self.font(
-                        20,
-                        True,
-                    ),
-                    fill=(235, 238, 245),
-                )
-
-            draw.text(
-                (
-                    195,
-                    row_y + 6,
-                ),
-                member.display_name[:27],
-                font=self.font(
-                    21,
-                    True,
-                ),
-                fill=(245, 247, 250),
             )
 
             draw.text(
                 (
-                    195,
-                    row_y + 32,
+                    145,
+                    y + 11,
                 ),
-                (
-                    f"{stat['given']} "
-                    f"vouches given"
+                name,
+                font=row_font,
+                fill=(
+                    235,
+                    235,
+                    235,
                 ),
-                font=self.font(
-                    16
-                ),
-                fill=(148, 157, 175),
             )
 
             draw.text(
                 (
-                    width - 260,
-                    row_y + 7,
+                    760,
+                    y + 12,
                 ),
-                str(stat["trust"]),
-                font=self.font(
-                    28,
-                    True,
+                f"Score {score}",
+                font=row_font,
+                fill=(
+                    255,
+                    255,
+                    255,
                 ),
-                fill=(99, 212, 162),
             )
 
             draw.text(
                 (
-                    width - 150,
-                    row_y + 17,
+                    950,
+                    y + 13,
                 ),
-                "TRUST",
-                font=self.font(
-                    14,
-                    True,
+                (
+                    f"+{positive} / "
+                    f"-{negative}"
                 ),
-                fill=(150, 159, 177),
+                font=small_font,
+                fill=(
+                    190,
+                    190,
+                    200,
+                ),
             )
 
-        if not visible:
+            y += 68
+
+        if not page_rows:
+
             draw.text(
                 (
-                    75,
-                    210,
+                    50,
+                    180,
                 ),
-                "No users found.",
-                font=self.font(
-                    28
+                "No trust data yet.",
+                font=row_font,
+                fill=(
+                    230,
+                    230,
+                    230,
                 ),
-                fill=(180, 188, 201),
             )
 
-        draw.text(
-            (
-                70,
-                height - 45,
-            ),
-            (
-                "25 Trader  •  "
-                "50 Trusted Trader"
-            ),
-            font=self.font(
-                18
-            ),
-            fill=(126, 136, 154),
-        )
-
-        buffer = io.BytesIO()
+        data = io.BytesIO()
 
         image.save(
-            buffer,
+            data,
             format="PNG",
-            optimize=True,
         )
 
-        buffer.seek(0)
+        data.seek(0)
 
-        return discord.File(
-            buffer,
-            filename="vouch-leaderboard.png",
+        file = discord.File(
+            data,
+            filename="leaderboard.png",
+        )
+
+        embed = discord.Embed(
+            title=(
+                f"Trust Leaderboard — "
+                f"Page {page + 1}/{total_pages}"
+            ),
+        )
+
+        embed.set_image(
+            url="attachment://leaderboard.png"
+        )
+
+        return (
+            embed,
+            file,
+            total_pages,
         )
 
     # ========================================================
-    # GIVEAWAYS
+    # GIVEAWAY RECOVERY
+    # ========================================================
+
+    async def recover_giveaways(self):
+
+        rows = await self.db.fetchall(
+            """
+            SELECT
+                message_id,
+                status,
+                ends_at,
+                processing_started_at
+            FROM giveaway_system
+            WHERE status IN (
+                'ACTIVE',
+                'PROCESSING'
+            )
+            """
+        )
+
+        current = now_ts()
+
+        for (
+            message_id,
+            status,
+            ends_at,
+            processing_started_at,
+        ) in rows:
+
+            message_id = int(
+                message_id
+            )
+
+            try:
+
+                self.add_view(
+                    GiveawayJoinView(
+                        self,
+                        message_id,
+                    ),
+                    message_id=message_id,
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Failed to register giveaway view for %s",
+                    message_id,
+                )
+
+            if (
+                status == "PROCESSING"
+                and current
+                - float(
+                    processing_started_at
+                    or 0
+                )
+                > 120
+            ):
+
+                await self.db.execute(
+                    """
+                    UPDATE giveaway_system
+                    SET
+                        status = 'ACTIVE',
+                        retry_count =
+                            retry_count + 1,
+                        last_error = ?
+                    WHERE message_id = ?
+                      AND status = 'PROCESSING'
+                    """,
+                    (
+                        "Recovered stale processing state during startup.",
+                        message_id,
+                    ),
+                )
+
+            if float(
+                ends_at or 0
+            ) <= current:
+
+                asyncio.create_task(
+                    self.finish_giveaway(
+                        message_id,
+                        "startup recovery",
+                    )
+                )
+
+    # ========================================================
+    # GIVEAWAY FINISH
     # ========================================================
 
     async def finish_giveaway(
         self,
         message_id: int,
-    ):
-        claimed = await self.db.execute(
-            """
-            UPDATE giveaway_system
-            SET
-                status = 'PROCESSING',
-                processing_started_at = ?
-            WHERE message_id = ?
-              AND status = 'ACTIVE'
-              AND ends_at <= ?
-            """,
-            (
-                now_ts(),
-                message_id,
-                now_ts(),
-            ),
-        )
-
-        if claimed != 1:
-            return
+        reason: str = "scheduled",
+    ) -> bool:
 
         row = await self.db.fetchone(
             """
@@ -1806,112 +1872,249 @@ class VouchBot(discord.Client):
                 guild_id,
                 prize,
                 winners,
+                ends_at,
                 host_id,
+                status,
+                req_daily,
+                req_weekly,
+                req_monthly,
+                req_total,
+                bypass_role_id,
                 retry_count
             FROM giveaway_system
             WHERE message_id = ?
             """,
-            (
-                message_id,
-            ),
+            (message_id,),
         )
 
-        if row is None:
-            return
+        if not row:
+            return False
 
         (
             channel_id,
             guild_id,
             prize,
             winners,
+            ends_at,
             host_id,
-            retries,
+            status,
+            req_daily,
+            req_weekly,
+            req_monthly,
+            req_total,
+            bypass_role_id,
+            retry_count,
         ) = row
 
+        if status == "ENDED":
+            return False
+
+        if status == "PROCESSING":
+            return False
+
+        claimed = await self.db.execute(
+            """
+            UPDATE giveaway_system
+            SET
+                status = 'PROCESSING',
+                processing_started_at = ?,
+                last_error = NULL
+            WHERE message_id = ?
+              AND status = 'ACTIVE'
+            """,
+            (
+                now_ts(),
+                message_id,
+            ),
+        )
+
+        if claimed != 1:
+            return False
+
         try:
-            channel = self.get_channel(
+
+            guild = self.get_guild(
+                int(guild_id)
+            )
+
+            if guild is None:
+
+                guild = await self.fetch_guild(
+                    int(guild_id)
+                )
+
+            channel = guild.get_channel(
                 int(channel_id)
             )
 
             if channel is None:
-                channel = await self.fetch_channel(
+
+                channel = await guild.fetch_channel(
                     int(channel_id)
                 )
 
-            participants = await self.db.fetchall(
+            participant_rows = await self.db.fetchall(
                 """
                 SELECT user_id
                 FROM giveaway_participants
                 WHERE message_id = ?
                 """,
-                (
-                    message_id,
-                ),
+                (message_id,),
             )
 
-            ids = [
+            participant_ids = [
                 int(row[0])
-                for row in participants
+                for row in participant_rows
             ]
 
-            random.shuffle(ids)
+            eligible = []
 
-            selected = ids[
-                :max(
-                    0,
-                    int(winners),
+            for user_id in participant_ids:
+
+                member = guild.get_member(
+                    user_id
                 )
+
+                if member is None:
+
+                    try:
+
+                        member = await guild.fetch_member(
+                            user_id
+                        )
+
+                    except discord.HTTPException:
+
+                        continue
+
+                if member.bot:
+                    continue
+
+                bypass = (
+                    int(
+                        bypass_role_id
+                        or 0
+                    ) > 0
+                    and any(
+                        role.id
+                        == int(
+                            bypass_role_id
+                        )
+                        for role
+                        in member.roles
+                    )
+                )
+
+                if bypass:
+
+                    eligible.append(
+                        member
+                    )
+
+                    continue
+
+                activity = await self.db.fetchone(
+                    """
+                    SELECT
+                        daily_message_count,
+                        week_message_count,
+                        month_message_count,
+                        message_count
+                    FROM user_activity
+                    WHERE guild_id = ?
+                      AND user_id = ?
+                    """,
+                    (
+                        guild.id,
+                        user_id,
+                    ),
+                )
+
+                if activity:
+
+                    (
+                        daily,
+                        weekly,
+                        monthly,
+                        total,
+                    ) = map(
+                        int,
+                        activity,
+                    )
+
+                else:
+
+                    (
+                        daily,
+                        weekly,
+                        monthly,
+                        total,
+                    ) = (
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+
+                if (
+                    daily
+                    >= int(req_daily or 0)
+                    and weekly
+                    >= int(req_weekly or 0)
+                    and monthly
+                    >= int(req_monthly or 0)
+                    and total
+                    >= int(req_total or 0)
+                ):
+
+                    eligible.append(
+                        member
+                    )
+
+            winners_count = max(
+                1,
+                int(winners),
+            )
+
+            selected = (
+                random.sample(
+                    eligible,
+                    min(
+                        winners_count,
+                        len(eligible),
+                    ),
+                )
+                if eligible
+                else []
+            )
+
+            winner_mentions = [
+                member.mention
+                for member in selected
             ]
 
-            winner_text = "No eligible winners."
+            winner_ids = [
+                member.id
+                for member in selected
+            ]
 
-            if selected:
-                winner_text = ", ".join(
-                    f"<@{uid}>"
-                    for uid in selected
+            winners_text = json.dumps(
+                winner_ids
+            )
+
+            history_winners = (
+                ", ".join(
+                    winner_mentions
                 )
-
-            embed = discord.Embed(
-                title="Giveaway Ended",
-                description=(
-                    f"**Prize:** {prize}\n"
-                    f"**Winners:** {winner_text}\n"
-                    f"**Participants:** {len(ids)}"
-                ),
-                color=discord.Color.gold(),
+                if winner_mentions
+                else "No eligible winners"
             )
 
-            embed.set_footer(
-                text=(
-                    f"Hosted by "
-                    f"<@{int(host_id)}>"
-                )
-            )
-
-            await channel.send(
-                embed=embed
-            )
+            completed_at = now_ts()
 
             await self.db.execute(
                 """
-                UPDATE giveaway_system
-                SET
-                    status = 'COMPLETED',
-                    result_winners = ?,
-                    result_participant_count = ?,
-                    last_error = NULL
-                WHERE message_id = ?
-                """,
-                (
-                    json.dumps(selected),
-                    len(ids),
-                    message_id,
-                ),
-            )
-
-            await self.db.execute(
-                """
-                INSERT OR IGNORE INTO giveaway_history (
+                INSERT INTO giveaway_history (
                     message_id,
                     guild_id,
                     prize,
@@ -1919,108 +2122,226 @@ class VouchBot(discord.Client):
                     winners,
                     completed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?
+                )
+                ON CONFLICT(message_id)
+                DO UPDATE SET
+                    participant_count =
+                        excluded.participant_count,
+                    winners =
+                        excluded.winners,
+                    completed_at =
+                        excluded.completed_at
                 """,
                 (
                     message_id,
-                    guild_id,
-                    prize,
-                    len(ids),
-                    json.dumps(selected),
-                    now_ts(),
+                    guild.id,
+                    str(prize),
+                    len(participant_ids),
+                    winners_text,
+                    completed_at,
                 ),
             )
 
-        except Exception as exc:
-            logger.exception(
-                "Giveaway %s failed.",
-                message_id,
+            await self.db.execute(
+                """
+                UPDATE giveaway_system
+                SET
+                    status = 'ENDED',
+                    processing_started_at = 0,
+                    result_message_id = 0,
+                    result_winners = ?,
+                    result_participant_count = ?,
+                    last_error = NULL
+                WHERE message_id = ?
+                """,
+                (
+                    winners_text,
+                    len(participant_ids),
+                    message_id,
+                ),
+            )
+
+            result_embed = discord.Embed(
+                title="Giveaway Ended",
+                description=(
+                    f"**Prize:** {prize}\n"
+                    f"**Participants:** "
+                    f"`{len(participant_ids)}`\n"
+                    f"**Winners:** "
+                    f"{history_winners}"
+                ),
+                colour=parse_color(
+                    None
+                ),
+            )
+
+            result_message = await channel.send(
+                content=(
+                    "Congratulations!"
+                    if selected
+                    else None
+                ),
+                embed=result_embed,
+                allowed_mentions=discord.AllowedMentions(
+                    users=True
+                ),
+            )
+
+            await self.db.execute(
+                """
+                UPDATE giveaway_system
+                SET result_message_id = ?
+                WHERE message_id = ?
+                """,
+                (
+                    result_message.id,
+                    message_id,
+                ),
             )
 
             try:
-                await self.db.execute(
-                    """
-                    UPDATE giveaway_system
-                    SET
-                        status = 'ACTIVE',
-                        processing_started_at = 0,
-                        retry_count = ?,
-                        last_error = ?
-                    WHERE message_id = ?
-                    """,
-                    (
-                        int(retries or 0) + 1,
-                        str(exc)[:1000],
-                        message_id,
+
+                original = await channel.fetch_message(
+                    message_id
+                )
+
+                ended_view = GiveawayJoinView(
+                    self,
+                    message_id,
+                    disabled=True,
+                )
+
+                ended_embed = discord.Embed(
+                    title="Giveaway Ended",
+                    description=(
+                        f"**Prize:** {prize}\n"
+                        f"**Winners:** {history_winners}\n"
+                        f"**Ended:** "
+                        f"{discord_time(completed_at)}"
+                    ),
+                    colour=parse_color(
+                        None
                     ),
                 )
-            except Exception:
-                logger.exception(
-                    "Could not restore failed giveaway %s.",
+
+                await original.edit(
+                    embed=ended_embed,
+                    view=ended_view,
+                )
+
+            except discord.HTTPException:
+
+                logger.warning(
+                    "Could not edit ended giveaway message %s",
                     message_id,
                 )
 
-    @tasks.loop(seconds=15)
-    async def giveaway_loop(self):
-        try:
-            rows = await self.db.fetchall(
+            logger.info(
+                "Finished giveaway %s (%s)",
+                message_id,
+                reason,
+            )
+
+            return True
+
+        except Exception as exc:
+
+            logger.exception(
+                "Failed to finish giveaway %s",
+                message_id,
+            )
+
+            await self.db.execute(
                 """
-                SELECT message_id
-                FROM giveaway_system
-                WHERE status = 'ACTIVE'
-                  AND ends_at <= ?
+                UPDATE giveaway_system
+                SET
+                    status = 'ACTIVE',
+                    processing_started_at = 0,
+                    retry_count =
+                        retry_count + 1,
+                    last_error = ?
+                WHERE message_id = ?
                 """,
                 (
-                    now_ts(),
+                    str(exc)[:1000],
+                    message_id,
                 ),
             )
 
-            for row in rows:
-                try:
-                    await self.finish_giveaway(
-                        int(row[0])
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to finish giveaway %s.",
-                        row[0],
-                    )
+            return False
 
-        except asyncio.CancelledError:
-            raise
+    # ========================================================
+    # GIVEAWAY LOOP
+    # ========================================================
 
-        except Exception:
-            logger.exception(
-                "Giveaway loop failed."
+    @tasks.loop(seconds=15)
+    async def giveaway_loop(self):
+
+        rows = await self.db.fetchall(
+            """
+            SELECT message_id
+            FROM giveaway_system
+            WHERE status = 'ACTIVE'
+              AND ends_at <= ?
+            ORDER BY ends_at ASC
+            LIMIT 25
+            """,
+            (now_ts(),),
+        )
+
+        for (
+            message_id,
+        ) in rows:
+
+            await self.finish_giveaway(
+                int(message_id)
             )
 
     @giveaway_loop.before_loop
     async def before_giveaway_loop(self):
+
         await self.wait_until_ready()
 
-    @tasks.loop(seconds=30)
-    async def temp_ban_loop(self):
-        try:
-            rows = await self.db.fetchall(
-                """
-                SELECT guild_id, target_id
-                FROM temporary_bans
-                WHERE expiry_timestamp <= ?
-                """,
-                (
-                    now_ts(),
-                ),
+    # ========================================================
+    # MAINTENANCE LOOP
+    # ========================================================
+
+    @tasks.loop(seconds=60)
+    async def maintenance_loop(self):
+
+        rows = await self.db.fetchall(
+            """
+            SELECT
+                guild_id,
+                target_id,
+                expiry_timestamp
+            FROM temporary_bans
+            WHERE expiry_timestamp <= ?
+            """,
+            (now_ts(),),
+        )
+
+        for (
+            guild_id,
+            target_id,
+            expiry,
+        ) in rows:
+
+            guild = self.get_guild(
+                int(guild_id)
             )
 
-            for guild_id, target_id in rows:
-                guild = self.get_guild(
-                    int(guild_id)
-                )
-
-                if guild is None:
-                    continue
+            if guild is not None:
 
                 try:
+
                     await guild.unban(
                         discord.Object(
                             id=int(target_id)
@@ -2031,82 +2352,205 @@ class VouchBot(discord.Client):
                 except discord.NotFound:
                     pass
 
-                except discord.Forbidden:
-                    logger.warning(
-                        "Cannot unban %s in guild %s.",
+                except discord.HTTPException:
+
+                    logger.exception(
+                        "Failed to unban %s from %s",
                         target_id,
                         guild_id,
                     )
-                    continue
 
-                except discord.HTTPException:
-                    logger.exception(
-                        "Unban failed for %s.",
-                        target_id,
-                    )
-                    continue
-
-                try:
-                    await self.db.execute(
-                        """
-                        DELETE FROM temporary_bans
-                        WHERE guild_id = ?
-                          AND target_id = ?
-                        """,
-                        (
-                            guild_id,
-                            target_id,
-                        ),
-                    )
-                except Exception:
-                    logger.exception(
-                        "Could not delete expired temporary ban."
-                    )
-
-        except asyncio.CancelledError:
-            raise
-
-        except Exception:
-            logger.exception(
-                "Temporary ban loop failed."
+            await self.db.execute(
+                """
+                DELETE FROM temporary_bans
+                WHERE guild_id = ?
+                  AND target_id = ?
+                """,
+                (
+                    guild_id,
+                    target_id,
+                ),
             )
 
-    @temp_ban_loop.before_loop
-    async def before_temp_ban_loop(self):
+    @maintenance_loop.before_loop
+    async def before_maintenance_loop(self):
+
         await self.wait_until_ready()
 
     # ========================================================
-    # AI
+    # ACTIVITY
     # ========================================================
 
-    async def ask_ai(
+    async def update_activity(
         self,
-        prompt: str,
-    ) -> str:
+        message: discord.Message,
+    ):
+
+        if (
+            message.guild is None
+            or message.author.bot
+        ):
+            return
+
+        guild_id = message.guild.id
+        user_id = message.author.id
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        day_key = now.strftime(
+            "%Y-%m-%d"
+        )
+
+        week_key = now.strftime(
+            "%G-W%V"
+        )
+
+        month_key = now.strftime(
+            "%Y-%m"
+        )
+
+        await self.db.execute(
+            """
+            INSERT INTO user_activity (
+                guild_id,
+                user_id,
+                message_count,
+                daily_message_count,
+                week_message_count,
+                month_message_count,
+                last_daily_date,
+                last_weekly_date,
+                last_monthly_date
+            )
+            VALUES (
+                ?,
+                ?,
+                1,
+                1,
+                1,
+                1,
+                ?,
+                ?,
+                ?
+            )
+            ON CONFLICT(
+                guild_id,
+                user_id
+            )
+            DO UPDATE SET
+
+                message_count =
+                    user_activity.message_count + 1,
+
+                daily_message_count =
+                    CASE
+                        WHEN
+                            user_activity.last_daily_date = ?
+                        THEN
+                            user_activity.daily_message_count + 1
+                        ELSE
+                            1
+                    END,
+
+                week_message_count =
+                    CASE
+                        WHEN
+                            user_activity.last_weekly_date = ?
+                        THEN
+                            user_activity.week_message_count + 1
+                        ELSE
+                            1
+                    END,
+
+                month_message_count =
+                    CASE
+                        WHEN
+                            user_activity.last_monthly_date = ?
+                        THEN
+                            user_activity.month_message_count + 1
+                        ELSE
+                            1
+                    END,
+
+                last_daily_date = ?,
+                last_weekly_date = ?,
+                last_monthly_date = ?
+            """,
+            (
+                guild_id,
+                user_id,
+                day_key,
+                week_key,
+                month_key,
+                day_key,
+                week_key,
+                month_key,
+                day_key,
+                week_key,
+                month_key,
+            ),
+        )
+
+    # ========================================================
+    # GROQ AI
+    # ========================================================
+
+    async def ai_reply(
+        self,
+        message: discord.Message,
+    ):
 
         if self.groq is None:
-            return "AI is not configured."
+            return
 
-        def request():
-            response = (
-                self.groq.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a concise, "
-                                "friendly Discord assistant."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        },
-                    ],
-                    temperature=0.7,
-                    max_tokens=600,
-                )
+        if self.user is None:
+            return
+
+        if self.user not in message.mentions:
+            return
+
+        if message.content.startswith("/"):
+            return
+
+        prompt = re.sub(
+            rf"<@!?{self.user.id}>",
+            "",
+            message.content,
+        ).strip()
+
+        if not prompt:
+
+            prompt = (
+                "Say hello and ask what "
+                "the user needs help with."
+            )
+
+        prompt = prompt[:3000]
+
+        try:
+
+            response = await asyncio.to_thread(
+                self.groq.chat.completions.create,
+                model=GROQ_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a concise, helpful "
+                            "Discord bot. Answer clearly "
+                            "and never pretend to have "
+                            "abilities you do not have."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                temperature=0.4,
+                max_tokens=700,
             )
 
             content = (
@@ -2114,880 +2558,188 @@ class VouchBot(discord.Client):
                 .choices[0]
                 .message
                 .content
+                .strip()
             )
 
-            return (
-                content.strip()
-                if content
-                else "I couldn't generate a response."
-            )
+            if content:
 
-        try:
-            return await asyncio.to_thread(
-                request
-            )
+                await message.reply(
+                    content[:2000],
+                    mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
         except Exception:
+
             logger.exception(
                 "Groq request failed."
             )
 
-            return (
-                "❌ AI is temporarily unavailable."
-            )
-
     # ========================================================
-    # COMMANDS
-    # ========================================================
-
-    @app_commands.command(
-        name="vouchpanel",
-        description="Post the vouch panel.",
-    )
-    @owner_only()
-    async def vouchpanel_command(
-        self,
-        interaction: discord.Interaction,
-    ):
-        if (
-            interaction.guild is None
-            or interaction.channel is None
-        ):
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
-
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        embed = discord.Embed(
-            title="Trader Vouch System",
-            description=(
-                "Your Trust score shows how reliable "
-                "you are when trading. Everyone starts "
-                "at **0 Trust** out of 100.\n\n"
-                "**How it works**\n"
-                "Use **Vouch A User** after a real trade. "
-                "Pick **+Vouch** or **-Vouch** and add "
-                "a short reason.\n"
-                "Use **Check User's Vouch** before "
-                "trading with someone.\n\n"
-                "**Vouch Rewards**\n"
-                f"**25** · <@&{TRADER_ROLE_ID}>\n"
-                f"**50** · <@&{TRUSTED_TRADER_ROLE_ID}>\n\n"
-                "Only use vouches for real trades."
-            ),
-            color=discord.Color.blurple(),
-        )
-
-        try:
-            await interaction.channel.send(
-                embed=embed,
-                view=TrustPanelView(self),
-            )
-
-            await interaction.followup.send(
-                "✅ Vouch panel posted.",
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Posting vouch panel failed."
-            )
-
-            await interaction.followup.send(
-                (
-                    "❌ I couldn't post the panel. "
-                    "Check my channel permissions."
-                ),
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="activity",
-        description="Show server activity.",
-    )
-    @owner_only()
-    async def activity_command(
-        self,
-        interaction: discord.Interaction,
-    ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
-
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            total = await self.db.fetchone(
-                """
-                SELECT COALESCE(
-                    SUM(message_count),
-                    0
-                )
-                FROM user_activity
-                WHERE guild_id = ?
-                """,
-                (
-                    interaction.guild.id,
-                ),
-            )
-
-            active = await self.db.fetchone(
-                """
-                SELECT COUNT(*)
-                FROM user_activity
-                WHERE guild_id = ?
-                  AND message_count > 0
-                """,
-                (
-                    interaction.guild.id,
-                ),
-            )
-
-            embed = discord.Embed(
-                title="Server Activity",
-                description=(
-                    f"**Messages:** "
-                    f"{int(total[0])}\n"
-                    f"**Active users:** "
-                    f"{int(active[0])}"
-                ),
-                color=discord.Color.blurple(),
-            )
-
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Activity command failed."
-            )
-
-            await interaction.followup.send(
-                "❌ Could not load activity.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="botstats",
-        description="Show bot statistics.",
-    )
-    @owner_only()
-    async def botstats_command(
-        self,
-        interaction: discord.Interaction,
-    ):
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            vouches = await self.db.fetchone(
-                "SELECT COUNT(*) FROM vouch_history"
-            )
-
-            giveaways = await self.db.fetchone(
-                "SELECT COUNT(*) FROM giveaway_history"
-            )
-
-            embed = discord.Embed(
-                title="Bot Stats",
-                description=(
-                    f"**Guilds:** "
-                    f"{len(self.guilds)}\n"
-                    f"**Vouches:** "
-                    f"{int(vouches[0])}\n"
-                    f"**Giveaways:** "
-                    f"{int(giveaways[0])}\n"
-                    f"**Latency:** "
-                    f"{round(self.latency * 1000, 2)} ms"
-                ),
-                color=discord.Color.blurple(),
-            )
-
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Botstats command failed."
-            )
-
-            await interaction.followup.send(
-                "❌ Could not load bot statistics.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="say",
-        description="Send a message as the bot.",
-    )
-    @app_commands.describe(
-        message="Message to send"
-    )
-    @owner_only()
-    async def say_command(
-        self,
-        interaction: discord.Interaction,
-        message: str,
-    ):
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            if interaction.channel is None:
-                await interaction.followup.send(
-                    "❌ Channel unavailable.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.channel.send(
-                message
-            )
-
-            await interaction.followup.send(
-                "✅ Sent.",
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Say command failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't send that message.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="sync",
-        description="Sync slash commands.",
-    )
-    @owner_only()
-    async def sync_command(
-        self,
-        interaction: discord.Interaction,
-    ):
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            synced = await self.tree.sync()
-
-            await interaction.followup.send(
-                f"✅ Synced {len(synced)} command(s).",
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Sync command failed."
-            )
-
-            await interaction.followup.send(
-                "❌ Command sync failed.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="transactionlog",
-        description="Set the vouch transaction log channel.",
-    )
-    @app_commands.describe(
-        channel="The transaction log channel"
-    )
-    @owner_only()
-    async def transactionlog_command(
-        self,
-        interaction: discord.Interaction,
-        channel: discord.TextChannel,
-    ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
-
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            await self.db.execute(
-                """
-                INSERT INTO transaction_log_config (
-                    guild_id,
-                    channel_id
-                )
-                VALUES (?, ?)
-                ON CONFLICT(guild_id)
-                DO UPDATE SET
-                    channel_id =
-                        excluded.channel_id
-                """,
-                (
-                    interaction.guild.id,
-                    channel.id,
-                ),
-            )
-
-            await interaction.followup.send(
-                (
-                    f"✅ Vouch logs will be sent to "
-                    f"{channel.mention}."
-                ),
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Transaction log setup failed."
-            )
-
-            await interaction.followup.send(
-                "❌ Could not set the transaction log channel.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="tempban",
-        description="Temporarily ban a member.",
-    )
-    @app_commands.describe(
-        user="Member to ban",
-        duration="e.g. 30m, 2h, 1d",
-    )
-    @owner_only()
-    async def tempban_command(
-        self,
-        interaction: discord.Interaction,
-        user: discord.Member,
-        duration: str,
-    ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
-
-        seconds = parse_duration(
-            duration
-        )
-
-        if seconds is None:
-            await send_interaction_message(
-                interaction,
-                (
-                    "❌ Invalid duration. "
-                    "Example: `30m`, `2h`, `1d`."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            await interaction.guild.ban(
-                user,
-                reason=(
-                    f"Temporary ban by "
-                    f"{interaction.user}"
-                ),
-                delete_message_seconds=0,
-            )
-
-        except discord.Forbidden:
-            await interaction.followup.send(
-                (
-                    "❌ I cannot ban that member. "
-                    "Check permissions and role hierarchy."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        except discord.HTTPException:
-            await interaction.followup.send(
-                "❌ Discord rejected the ban.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            await self.db.execute(
-                """
-                INSERT INTO temporary_bans (
-                    guild_id,
-                    target_id,
-                    expiry_timestamp
-                )
-                VALUES (?, ?, ?)
-                ON CONFLICT(guild_id, target_id)
-                DO UPDATE SET
-                    expiry_timestamp =
-                        excluded.expiry_timestamp
-                """,
-                (
-                    interaction.guild.id,
-                    user.id,
-                    now_ts() + seconds,
-                ),
-            )
-
-        except Exception:
-            logger.exception(
-                "Could not save temporary ban."
-            )
-
-            await interaction.followup.send(
-                (
-                    f"⚠️ {user.mention} was banned, "
-                    "but the temporary-ban timer could not "
-                    "be saved."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await interaction.followup.send(
-            (
-                f"✅ {user.mention} was banned "
-                f"for `{duration}`."
-            ),
-            ephemeral=True,
-        )
-
-    # ========================================================
-    # GIVEAWAY COMMANDS
-    # ========================================================
-
-    @app_commands.command(
-        name="create",
-        description="Create a giveaway.",
-    )
-    @app_commands.describe(
-        prize="Prize",
-        duration="e.g. 30m, 2h, 1d",
-        winners="Winner count",
-    )
-    @owner_only()
-    async def giveaway_create(
-        self,
-        interaction: discord.Interaction,
-        prize: str,
-        duration: str,
-        winners: int,
-    ):
-        if (
-            interaction.guild is None
-            or interaction.channel is None
-        ):
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
-
-        seconds = parse_duration(
-            duration
-        )
-
-        if seconds is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Invalid duration.",
-                ephemeral=True,
-            )
-            return
-
-        if not 1 <= winners <= 100:
-            await send_interaction_message(
-                interaction,
-                "❌ Winners must be between 1 and 100.",
-                ephemeral=True,
-            )
-            return
-
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            ends = now_ts() + seconds
-
-            embed = discord.Embed(
-                title="Giveaway",
-                description=(
-                    f"**Prize:** {prize}\n"
-                    f"**Winners:** {winners}\n"
-                    f"**Ends:** {discord_time(ends)}\n\n"
-                    "Click the button below to enter."
-                ),
-                color=discord.Color.blurple(),
-            )
-
-            embed.set_footer(
-                text=f"Hosted by {interaction.user}"
-            )
-
-            message = await interaction.channel.send(
-                embed=embed
-            )
-
-            view = GiveawayJoinView(
-                self,
-                message.id,
-            )
-
-            await message.edit(
-                view=view
-            )
-
-            self.add_view(
-                view,
-                message_id=message.id,
-            )
-
-            await self.db.execute(
-                """
-                INSERT INTO giveaway_system (
-                    message_id,
-                    channel_id,
-                    guild_id,
-                    prize,
-                    ends_at,
-                    winners,
-                    host_id,
-                    status
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
-                """,
-                (
-                    message.id,
-                    interaction.channel.id,
-                    interaction.guild.id,
-                    prize,
-                    ends,
-                    winners,
-                    interaction.user.id,
-                ),
-            )
-
-            await interaction.followup.send(
-                (
-                    f"✅ Giveaway created: "
-                    f"{message.jump_url}"
-                ),
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Creating giveaway failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't create the giveaway.",
-                ephemeral=True,
-            )
-
-    @app_commands.command(
-        name="end",
-        description="End a giveaway early.",
-    )
-    @app_commands.describe(
-        message_id="Giveaway message ID"
-    )
-    @owner_only()
-    async def giveaway_end(
-        self,
-        interaction: discord.Interaction,
-        message_id: str,
-    ):
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            giveaway_id = int(
-                message_id
-            )
-        except ValueError:
-            await interaction.followup.send(
-                "❌ Invalid message ID.",
-                ephemeral=True,
-            )
-            return
-
-        try:
-            row = await self.db.fetchone(
-                """
-                SELECT status
-                FROM giveaway_system
-                WHERE message_id = ?
-                """,
-                (
-                    giveaway_id,
-                ),
-            )
-
-            if row is None:
-                await interaction.followup.send(
-                    "❌ Giveaway not found.",
-                    ephemeral=True,
-                )
-                return
-
-            if row[0] != "ACTIVE":
-                await interaction.followup.send(
-                    "❌ Giveaway is not active.",
-                    ephemeral=True,
-                )
-                return
-
-            await self.db.execute(
-                """
-                UPDATE giveaway_system
-                SET ends_at = ?
-                WHERE message_id = ?
-                """,
-                (
-                    now_ts(),
-                    giveaway_id,
-                ),
-            )
-
-            await self.finish_giveaway(
-                giveaway_id
-            )
-
-            await interaction.followup.send(
-                "✅ Giveaway ended.",
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Ending giveaway failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't end the giveaway.",
-                ephemeral=True,
-            )
-
-    # ========================================================
-    # EVENTS
+    # MEMBER EVENTS
     # ========================================================
 
     async def on_member_join(
         self,
         member: discord.Member,
     ):
-        if not member.bot:
+
+        await self.ensure_user(
+            member.guild.id,
+            member.id,
+        )
+
+        row = await self.db.fetchone(
+            """
+            SELECT expiry_timestamp
+            FROM temporary_bans
+            WHERE guild_id = ?
+              AND target_id = ?
+            """,
+            (
+                member.guild.id,
+                member.id,
+            ),
+        )
+
+        if not row:
+            return
+
+        expiry = float(row[0])
+
+        if expiry > now_ts():
+
             try:
-                await self.ensure_trust_user(
+
+                await member.guild.ban(
+                    member,
+                    reason="Active temporary ban",
+                    delete_message_seconds=0,
+                )
+
+            except discord.HTTPException:
+
+                logger.exception(
+                    "Failed to re-ban member %s",
+                    member.id,
+                )
+
+        else:
+
+            await self.db.execute(
+                """
+                DELETE FROM temporary_bans
+                WHERE guild_id = ?
+                  AND target_id = ?
+                """,
+                (
                     member.guild.id,
                     member.id,
-                )
-            except Exception:
-                logger.exception(
-                    "Could not initialize Trust user %s.",
-                    member.id,
-                )
+                ),
+            )
 
     async def on_message(
         self,
         message: discord.Message,
     ):
+
         if message.author.bot:
             return
 
-        if message.guild is not None:
-            try:
-                today = (
-                    datetime.now(
-                        timezone.utc
-                    )
-                    .date()
-                    .isoformat()
-                )
+        try:
 
-                week = (
-                    datetime.now(
-                        timezone.utc
-                    )
-                    .strftime("%G-W%V")
-                )
-
-                month = (
-                    datetime.now(
-                        timezone.utc
-                    )
-                    .strftime("%Y-%m")
-                )
-
-                await self.db.execute(
-                    """
-                    INSERT INTO user_activity (
-                        guild_id,
-                        user_id,
-                        message_count,
-                        daily_message_count,
-                        week_message_count,
-                        month_message_count,
-                        last_daily_date,
-                        last_weekly_date,
-                        last_monthly_date
-                    )
-                    VALUES (
-                        ?, ?, 1, 1, 1, 1, ?, ?, ?
-                    )
-                    ON CONFLICT(guild_id, user_id)
-                    DO UPDATE SET
-                        message_count =
-                            message_count + 1,
-                        daily_message_count =
-                            daily_message_count + 1,
-                        week_message_count =
-                            week_message_count + 1,
-                        month_message_count =
-                            month_message_count + 1
-                    """,
-                    (
-                        message.guild.id,
-                        message.author.id,
-                        today,
-                        week,
-                        month,
-                    ),
-                )
-
-            except Exception:
-                logger.exception(
-                    "Activity update failed."
-                )
-
-        # AI mention handling.
-        if (
-            self.user
-            and self.user in message.mentions
-        ):
-            prompt = message.content
-
-            prompt = prompt.replace(
-                f"<@{self.user.id}>",
-                "",
+            await self.update_activity(
+                message
             )
 
-            prompt = prompt.replace(
-                f"<@!{self.user.id}>",
-                "",
+        except Exception:
+
+            logger.exception(
+                "Failed to record message activity."
             )
 
-            prompt = prompt.strip()
+        await self.ai_reply(
+            message
+        )
 
-            if not prompt:
-                await message.reply(
-                    "Mention me with a question and I’ll answer."
-                )
-                return
-
-            answer = await self.ask_ai(
-                prompt
-            )
-
-            await message.reply(
-                answer[:2000]
-            )
+    # ========================================================
+    # APP COMMAND ERROR
+    # ========================================================
 
     async def on_app_command_error(
         self,
         interaction: discord.Interaction,
         error: app_commands.AppCommandError,
     ):
+
+        original = getattr(
+            error,
+            "original",
+            error,
+        )
+
+        logger.error(
+            "Application command error.",
+            exc_info=(
+                type(original),
+                original,
+                original.__traceback__,
+            ),
+        )
+
         if isinstance(
+            error,
+            app_commands.MissingPermissions,
+        ):
+
+            message = (
+                "You do not have the required permissions."
+            )
+
+        elif isinstance(
             error,
             app_commands.CheckFailure,
         ):
+
             message = (
-                "❌ You do not have permission "
-                "to use this command."
+                "You are not allowed to use this command."
+            )
+
+        elif isinstance(
+            original,
+            discord.Forbidden,
+        ):
+
+            message = (
+                "I do not have permission "
+                "to perform that action."
             )
 
         else:
-            logger.exception(
-                "Slash command error",
-                exc_info=error,
-            )
 
             message = (
-                "❌ Something went wrong. "
-                "Check the bot logs."
+                "An unexpected error occurred "
+                "while running that command."
             )
 
-        try:
-            await send_interaction_message(
-                interaction,
-                message,
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Could not send command error response."
-            )
+        await send_interaction_message(
+            interaction,
+            message,
+            ephemeral=True,
+        )
 
 
 # ============================================================
 # TRUST PANEL
 # ============================================================
 
-class TrustPanelView(
-    SafeView
-):
+class TrustPanelView(SafeView):
 
     def __init__(
         self,
         bot: VouchBot,
     ):
+
         super().__init__(
             timeout=None
         )
@@ -2996,64 +2748,56 @@ class TrustPanelView(
 
     @discord.ui.button(
         label="My Profile",
-        style=discord.ButtonStyle.secondary,
-        custom_id="trust:my_profile",
+        style=discord.ButtonStyle.primary,
+        custom_id="trust_panel:profile",
     )
     async def my_profile(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
+
         if interaction.guild is None:
+
             await send_interaction_message(
                 interaction,
-                "❌ Server only.",
-                ephemeral=True,
+                "This panel only works inside a server.",
             )
+
             return
 
         await acknowledge(
-            interaction,
-            ephemeral=True,
+            interaction
         )
 
-        try:
-            embed = await self.bot.build_profile_embed(
-                interaction.guild,
-                interaction.user,
-            )
+        embed = await self.bot.make_profile_embed(
+            interaction.guild,
+            interaction.user,
+        )
 
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "My Profile failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't load your profile.",
-                ephemeral=True,
-            )
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
 
     @discord.ui.button(
         label="Check User's Vouch",
         style=discord.ButtonStyle.secondary,
-        custom_id="trust:check_user",
+        custom_id="trust_panel:check",
     )
     async def check_user(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
+
         if interaction.guild is None:
+
             await send_interaction_message(
                 interaction,
-                "❌ Server only.",
-                ephemeral=True,
+                "This panel only works inside a server.",
             )
+
             return
 
         await interaction.response.send_message(
@@ -3066,20 +2810,22 @@ class TrustPanelView(
 
     @discord.ui.button(
         label="Vouch A User",
-        style=discord.ButtonStyle.primary,
-        custom_id="trust:vouch_user",
+        style=discord.ButtonStyle.success,
+        custom_id="trust_panel:vouch",
     )
     async def vouch_user(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
+
         if interaction.guild is None:
+
             await send_interaction_message(
                 interaction,
-                "❌ Server only.",
-                ephemeral=True,
+                "This panel only works inside a server.",
             )
+
             return
 
         await interaction.response.send_message(
@@ -3093,21 +2839,22 @@ class TrustPanelView(
     @discord.ui.button(
         label="Vouch Rewards",
         style=discord.ButtonStyle.secondary,
-        custom_id="trust:rewards",
+        custom_id="trust_panel:rewards",
     )
     async def rewards(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
+
         embed = discord.Embed(
             title="Vouch Rewards",
             description=(
-                "Trust starts at **0**.\n\n"
-                f"**25** · <@&{TRADER_ROLE_ID}>\n\n"
-                f"**50** · <@&{TRUSTED_TRADER_ROLE_ID}>"
+                f"**{TRADER_THRESHOLD} trust** → Trader role\n"
+                f"**{TRUSTED_TRADER_THRESHOLD} trust** → Trusted Trader role\n\n"
+                "Positive vouches increase trust. "
+                "Negative vouches reduce trust."
             ),
-            color=discord.Color.gold(),
         )
 
         await interaction.response.send_message(
@@ -3117,182 +2864,83 @@ class TrustPanelView(
 
     @discord.ui.button(
         label="Vouch Leaderboard",
-        style=discord.ButtonStyle.secondary,
-        custom_id="trust:leaderboard",
+        style=discord.ButtonStyle.primary,
+        custom_id="trust_panel:leaderboard",
     )
     async def leaderboard(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
+
         if interaction.guild is None:
+
             await send_interaction_message(
                 interaction,
-                "❌ Server only.",
-                ephemeral=True,
+                "This panel only works inside a server.",
             )
+
             return
 
         await acknowledge(
-            interaction,
+            interaction
+        )
+
+        (
+            embed,
+            file,
+            total_pages,
+        ) = await self.bot.render_leaderboard(
+            interaction.guild,
+            0,
+        )
+
+        view = VouchLeaderboardView(
+            self.bot,
+            0,
+            total_pages,
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            file=file,
+            view=view,
             ephemeral=True,
         )
 
-        try:
-            view = VouchLeaderboardView(
-                self.bot,
-                interaction.guild,
-                0,
-            )
-
-            embed, file = await view.render()
-
-            await interaction.followup.send(
-                embed=embed,
-                file=file,
-                view=view,
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Opening leaderboard failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't load the leaderboard.",
-                ephemeral=True,
-            )
-
 
 # ============================================================
-# VOUCH TARGET
+# VOUCH TARGET VIEW
 # ============================================================
 
-class VouchTargetView(
-    SafeView
-):
+class VouchTargetView(SafeView):
 
     def __init__(
         self,
         bot: VouchBot,
     ):
+
         super().__init__(
-            timeout=120
+            timeout=300
         )
 
         self.bot = bot
 
-        self.user_select = discord.ui.UserSelect(
-            placeholder="Select a user",
-            min_values=1,
-            max_values=1,
-        )
-
-        self.user_select.callback = (
-            self.user_selected
-        )
-
         self.add_item(
-            self.user_select
+            VouchUserSelect(
+                bot
+            )
         )
-
-    async def user_selected(
-        self,
-        interaction: discord.Interaction,
-    ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
-
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            values = self.user_select.values
-
-            if not values:
-                await interaction.followup.send(
-                    "❌ No user selected.",
-                    ephemeral=True,
-                )
-                return
-
-            target = values[0]
-
-            if not isinstance(
-                target,
-                discord.Member,
-            ):
-                target = interaction.guild.get_member(
-                    target.id
-                )
-
-            if target is None:
-                await interaction.followup.send(
-                    "❌ User not found.",
-                    ephemeral=True,
-                )
-                return
-
-            if target.bot:
-                await interaction.followup.send(
-                    "❌ You cannot vouch a bot.",
-                    ephemeral=True,
-                )
-                return
-
-            if target.id == interaction.user.id:
-                await interaction.followup.send(
-                    "❌ You cannot vouch yourself.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.followup.send(
-                (
-                    f"You selected **{target.display_name}**. "
-                    "Choose the vouch type:"
-                ),
-                view=VouchTypeView(
-                    self.bot,
-                    target.id,
-                ),
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Vouch target select failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't process that user.",
-                ephemeral=True,
-            )
 
     @discord.ui.button(
         label="Enter Name / ID",
         style=discord.ButtonStyle.secondary,
     )
-    async def enter_name(
+    async def manual(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
 
         await interaction.response.send_modal(
             VouchMemberModal(
@@ -3301,96 +2949,174 @@ class VouchTargetView(
         )
 
 
-# ============================================================
-# VOUCH MEMBER MODAL
-# ============================================================
-
-class VouchMemberModal(
-    SafeModal,
-    title="Find User",
+class VouchUserSelect(
+    discord.ui.UserSelect
 ):
-
-    user_input = discord.ui.TextInput(
-        label="Name / ID",
-        placeholder="Username, display name or Discord ID",
-        required=True,
-        max_length=100,
-    )
 
     def __init__(
         self,
         bot: VouchBot,
     ):
-        super().__init__()
+
+        super().__init__(
+            placeholder="Select a user to vouch",
+            min_values=1,
+            max_values=1,
+        )
+
         self.bot = bot
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        if interaction.guild is None:
+
+            await send_interaction_message(
+                interaction,
+                "This panel only works inside a server.",
+            )
+
+            return
+
+        await acknowledge(
+            interaction
+        )
+
+        target = self.values[0]
+
+        member = interaction.guild.get_member(
+            target.id
+        )
+
+        if member is None:
+
+            try:
+
+                member = await interaction.guild.fetch_member(
+                    target.id
+                )
+
+            except discord.HTTPException:
+
+                member = None
+
+        if member is None:
+
+            await interaction.followup.send(
+                "I could not find that member.",
+                ephemeral=True,
+            )
+
+            return
+
+        if member.bot:
+
+            await interaction.followup.send(
+                "Bots cannot be vouched.",
+                ephemeral=True,
+            )
+
+            return
+
+        await interaction.followup.send(
+            (
+                f"You selected {member.mention}. "
+                "Choose a vouch type:"
+            ),
+            view=VouchTypeView(
+                self.bot,
+                member.id,
+            ),
+            ephemeral=True,
+        )
+
+
+# ============================================================
+# VOUCH MEMBER MODAL
+# ============================================================
+
+class VouchMemberModal(
+    SafeModal
+):
+
+    def __init__(
+        self,
+        bot: VouchBot,
+    ):
+
+        super().__init__(
+            title="Find User"
+        )
+
+        self.bot = bot
+
+        self.value = discord.ui.TextInput(
+            label="Name, mention or ID",
+            placeholder=(
+                "e.g. 123456789012345678"
+            ),
+            required=True,
+            max_length=100,
+        )
+
+        self.add_item(
+            self.value
+        )
 
     async def on_submit(
         self,
         interaction: discord.Interaction,
     ):
+
         if interaction.guild is None:
+
             await send_interaction_message(
                 interaction,
-                "❌ Server only.",
-                ephemeral=True,
+                "This form only works inside a server.",
             )
+
             return
 
         await acknowledge(
-            interaction,
-            ephemeral=True,
+            interaction
         )
 
-        try:
-            target = await self.bot.resolve_member(
-                interaction.guild,
-                str(
-                    self.user_input
-                ).strip(),
-            )
+        member = await self.bot.resolve_member(
+            interaction.guild,
+            str(self.value.value),
+        )
 
-            if target is None:
-                await interaction.followup.send(
-                    "❌ User not found.",
-                    ephemeral=True,
-                )
-                return
-
-            if target.bot:
-                await interaction.followup.send(
-                    "❌ You cannot vouch a bot.",
-                    ephemeral=True,
-                )
-                return
-
-            if target.id == interaction.user.id:
-                await interaction.followup.send(
-                    "❌ You cannot vouch yourself.",
-                    ephemeral=True,
-                )
-                return
+        if member is None:
 
             await interaction.followup.send(
-                (
-                    f"You selected **{target.display_name}**. "
-                    "Choose the vouch type:"
-                ),
-                view=VouchTypeView(
-                    self.bot,
-                    target.id,
-                ),
+                "I could not find that user.",
                 ephemeral=True,
             )
 
-        except Exception:
-            logger.exception(
-                "Vouch member modal failed."
-            )
+            return
+
+        if member.bot:
 
             await interaction.followup.send(
-                "❌ I couldn't find that user.",
+                "Bots cannot be vouched.",
                 ephemeral=True,
             )
+
+            return
+
+        await interaction.followup.send(
+            (
+                f"You selected {member.mention}. "
+                "Choose a vouch type:"
+            ),
+            view=VouchTypeView(
+                self.bot,
+                member.id,
+            ),
+            ephemeral=True,
+        )
 
 
 # ============================================================
@@ -3406,8 +3132,9 @@ class VouchTypeView(
         bot: VouchBot,
         target_id: int,
     ):
+
         super().__init__(
-            timeout=120
+            timeout=300
         )
 
         self.bot = bot
@@ -3422,6 +3149,7 @@ class VouchTypeView(
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
+
         await interaction.response.send_modal(
             VouchReasonModal(
                 self.bot,
@@ -3439,6 +3167,7 @@ class VouchTypeView(
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
+
         await interaction.response.send_modal(
             VouchReasonModal(
                 self.bot,
@@ -3462,12 +3191,9 @@ class VouchReasonModal(
         target_id: int,
         vouch_type: str,
     ):
+
         super().__init__(
-            title=(
-                "+Vouch"
-                if vouch_type == "POSITIVE"
-                else "-Vouch"
-            )
+            title="Vouch Reason"
         )
 
         self.bot = bot
@@ -3476,10 +3202,13 @@ class VouchReasonModal(
 
         self.reason = discord.ui.TextInput(
             label="Reason",
-            placeholder="Explain the trade briefly",
-            required=True,
-            max_length=200,
             style=discord.TextStyle.paragraph,
+            placeholder=(
+                "Explain why you are giving this vouch."
+            ),
+            required=True,
+            min_length=2,
+            max_length=1000,
         )
 
         self.add_item(
@@ -3490,125 +3219,71 @@ class VouchReasonModal(
         self,
         interaction: discord.Interaction,
     ):
+
         if interaction.guild is None:
+
             await send_interaction_message(
                 interaction,
-                "❌ Server only.",
-                ephemeral=True,
+                "This form only works inside a server.",
             )
+
             return
 
         await acknowledge(
-            interaction,
+            interaction
+        )
+
+        target = interaction.guild.get_member(
+            self.target_id
+        )
+
+        if target is None:
+
+            try:
+
+                target = await interaction.guild.fetch_member(
+                    self.target_id
+                )
+
+            except discord.HTTPException:
+
+                target = None
+
+        if target is None:
+
+            await interaction.followup.send(
+                "That user is no longer in the server.",
+                ephemeral=True,
+            )
+
+            return
+
+        confirm_embed = discord.Embed(
+            title="Confirm Vouch",
+            description=(
+                f"**Target:** {target.mention}\n"
+                f"**Type:** "
+                f"{'Positive' if self.vouch_type == 'POSITIVE' else 'Negative'}\n"
+                f"**Reason:** "
+                f"{discord.utils.escape_markdown(str(self.reason.value))}"
+            ),
+        )
+
+        await interaction.followup.send(
+            embed=confirm_embed,
+            view=VouchConfirmView(
+                self.bot,
+                interaction.user.id,
+                target.id,
+                self.vouch_type,
+                str(self.reason.value),
+            ),
             ephemeral=True,
         )
 
-        try:
-            target = interaction.guild.get_member(
-                self.target_id
-            )
-
-            if target is None:
-                try:
-                    target = await interaction.guild.fetch_member(
-                        self.target_id
-                    )
-                except (
-                    discord.NotFound,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                ):
-                    target = None
-
-            if target is None:
-                await interaction.followup.send(
-                    (
-                        "❌ That user is no longer "
-                        "in this server."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            reason = str(
-                self.reason
-            ).strip()
-
-            if not reason:
-                await interaction.followup.send(
-                    "❌ Reason cannot be empty.",
-                    ephemeral=True,
-                )
-                return
-
-            label = (
-                "+Vouch"
-                if self.vouch_type == "POSITIVE"
-                else "-Vouch"
-            )
-
-            embed = discord.Embed(
-                title="Confirm Vouch",
-                description=(
-                    "Review this before it is saved."
-                ),
-                color=(
-                    discord.Color.green()
-                    if self.vouch_type == "POSITIVE"
-                    else discord.Color.red()
-                ),
-            )
-
-            embed.add_field(
-                name="User",
-                value=target.mention,
-                inline=False,
-            )
-
-            embed.add_field(
-                name="Type",
-                value=label,
-                inline=True,
-            )
-
-            embed.add_field(
-                name="Reason",
-                value=reason,
-                inline=False,
-            )
-
-            embed.set_footer(
-                text=(
-                    "The vouch is only saved "
-                    "after Confirm Vouch."
-                )
-            )
-
-            await interaction.followup.send(
-                embed=embed,
-                view=VouchConfirmView(
-                    self.bot,
-                    target.id,
-                    self.vouch_type,
-                    reason,
-                    interaction.user.id,
-                ),
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Vouch reason modal failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't prepare the confirmation.",
-                ephemeral=True,
-            )
-
 
 # ============================================================
-# VOUCH CONFIRM
+# VOUCH CONFIRMATION
 # ============================================================
 
 class VouchConfirmView(
@@ -3618,37 +3293,31 @@ class VouchConfirmView(
     def __init__(
         self,
         bot: VouchBot,
+        requester_id: int,
         target_id: int,
         vouch_type: str,
         reason: str,
-        giver_id: int,
     ):
+
         super().__init__(
-            timeout=120
+            timeout=180
         )
 
         self.bot = bot
+        self.requester_id = requester_id
         self.target_id = target_id
         self.vouch_type = vouch_type
         self.reason = reason
-        self.giver_id = giver_id
 
-    async def interaction_check(
+    def authorized(
         self,
         interaction: discord.Interaction,
     ) -> bool:
-        if interaction.user.id != self.giver_id:
-            await send_interaction_message(
-                interaction,
-                (
-                    "❌ This confirmation belongs "
-                    "to another user."
-                ),
-                ephemeral=True,
-            )
-            return False
 
-        return True
+        return (
+            interaction.user.id
+            == self.requester_id
+        )
 
     @discord.ui.button(
         label="Confirm Vouch",
@@ -3659,126 +3328,140 @@ class VouchConfirmView(
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
+
+        if not self.authorized(
+            interaction
+        ):
+
+            await interaction.response.send_message(
+                (
+                    "This confirmation belongs "
+                    "to another user."
+                ),
                 ephemeral=True,
             )
+
             return
 
-        # CRITICAL: acknowledge before DB work.
-        await acknowledge(
-            interaction,
-            ephemeral=True,
+        if (
+            interaction.guild is None
+            or not isinstance(
+                interaction.user,
+                discord.Member,
+            )
+        ):
+
+            await send_interaction_message(
+                interaction,
+                "This action only works inside a server.",
+            )
+
+            return
+
+        # IMPORTANT:
+        # This is a component update, so we use the
+        # deferred message-update response here.
+        await interaction.response.defer(
+            thinking=False
         )
 
-        for item in self.children:
-            item.disabled = True
+        target = interaction.guild.get_member(
+            self.target_id
+        )
 
-        try:
-            if interaction.message is not None:
-                try:
-                    await interaction.message.edit(
-                        view=self
-                    )
-                except (
-                    discord.NotFound,
-                    discord.Forbidden,
-                    discord.HTTPException,
-                ):
-                    pass
+        if target is None:
 
-            result = await self.bot.process_vouch(
-                interaction.guild,
-                interaction.user,
-                self.target_id,
-                self.vouch_type,
-                self.reason,
-            )
+            try:
 
-            if not result["ok"]:
-                await interaction.followup.send(
-                    result["message"],
-                    ephemeral=True,
+                target = await interaction.guild.fetch_member(
+                    self.target_id
                 )
-                return
 
-            label = (
-                "+Vouch"
-                if self.vouch_type == "POSITIVE"
-                else "-Vouch"
-            )
+            except discord.HTTPException:
 
-            embed = discord.Embed(
-                title=f"{label} confirmed",
-                description=(
-                    f"{result['target'].mention} "
-                    f"is now at "
-                    f"**{result['new_score']}/100 Trust**."
-                    f"\n\n"
-                    f"**Reason:** {self.reason}"
+                target = None
+
+        if target is None:
+
+            await interaction.edit_original_response(
+                content=(
+                    "That user is no longer "
+                    "in the server."
                 ),
-                color=(
-                    discord.Color.green()
-                    if self.vouch_type == "POSITIVE"
-                    else discord.Color.red()
+                embed=None,
+                view=None,
+            )
+
+            return
+
+        (
+            success,
+            message,
+            score,
+        ) = await self.bot.process_vouch(
+            interaction.guild,
+            interaction.user,
+            target,
+            self.vouch_type,
+            self.reason,
+        )
+
+        for child in self.children:
+            child.disabled = True
+
+        if success:
+
+            await interaction.edit_original_response(
+                content=(
+                    f"✅ {message}\n"
+                    f"New trust score for "
+                    f"{target.mention}: `{score}`."
                 ),
+                embed=None,
+                view=self,
             )
 
-            embed.set_footer(
-                text=self.bot.trust_bar(
-                    result["new_score"]
-                )
-            )
+        else:
 
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Confirm vouch failed."
-            )
-
-            await interaction.followup.send(
-                "❌ The vouch could not be completed.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content=f"❌ {message}",
+                embed=None,
+                view=self,
             )
 
     @discord.ui.button(
         label="Cancel",
-        style=discord.ButtonStyle.danger,
+        style=discord.ButtonStyle.secondary,
     )
     async def cancel(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        for item in self.children:
-            item.disabled = True
 
-        try:
-            await interaction.response.edit_message(
-                content="❌ Vouch cancelled.",
-                embed=None,
-                view=self,
-            )
-        except Exception:
-            logger.exception(
-                "Vouch cancellation failed."
-            )
+        if not self.authorized(
+            interaction
+        ):
 
-            await send_interaction_message(
-                interaction,
-                "❌ Vouch cancelled.",
+            await interaction.response.send_message(
+                (
+                    "This confirmation belongs "
+                    "to another user."
+                ),
                 ephemeral=True,
             )
 
+            return
+
+        await interaction.response.edit_message(
+            content="Vouch cancelled.",
+            embed=None,
+            view=None,
+        )
+
 
 # ============================================================
-# CHECK MEMBER
+# CHECK MEMBER VIEW
 # ============================================================
 
 class CheckMemberView(
@@ -3789,106 +3472,28 @@ class CheckMemberView(
         self,
         bot: VouchBot,
     ):
+
         super().__init__(
-            timeout=120
+            timeout=300
         )
 
         self.bot = bot
 
-        self.user_select = discord.ui.UserSelect(
-            placeholder="Select a user",
-            min_values=1,
-            max_values=1,
-        )
-
-        self.user_select.callback = (
-            self.user_selected
-        )
-
         self.add_item(
-            self.user_select
+            CheckUserSelect(
+                bot
+            )
         )
-
-    async def user_selected(
-        self,
-        interaction: discord.Interaction,
-    ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
-
-        await acknowledge(
-            interaction,
-            ephemeral=True,
-        )
-
-        try:
-            values = self.user_select.values
-
-            if not values:
-                await interaction.followup.send(
-                    "❌ No user selected.",
-                    ephemeral=True,
-                )
-                return
-
-            target = values[0]
-
-            if not isinstance(
-                target,
-                discord.Member,
-            ):
-                target = interaction.guild.get_member(
-                    target.id
-                )
-
-            if target is None:
-                await interaction.followup.send(
-                    "❌ User not found.",
-                    ephemeral=True,
-                )
-                return
-
-            embed = await self.bot.build_profile_embed(
-                interaction.guild,
-                target,
-            )
-
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True,
-            )
-
-        except Exception:
-            logger.exception(
-                "Check-user select failed."
-            )
-
-            await interaction.followup.send(
-                "❌ I couldn't load that profile.",
-                ephemeral=True,
-            )
 
     @discord.ui.button(
         label="Enter Name / ID",
         style=discord.ButtonStyle.secondary,
     )
-    async def enter_name(
+    async def manual(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
-                ephemeral=True,
-            )
-            return
 
         await interaction.response.send_modal(
             CheckMemberModal(
@@ -3897,76 +3502,147 @@ class CheckMemberView(
         )
 
 
-class CheckMemberModal(
-    SafeModal,
-    title="Find User",
+class CheckUserSelect(
+    discord.ui.UserSelect
 ):
-
-    user_input = discord.ui.TextInput(
-        label="Name / ID",
-        placeholder="Username, display name or Discord ID",
-        required=True,
-        max_length=100,
-    )
 
     def __init__(
         self,
         bot: VouchBot,
     ):
-        super().__init__()
+
+        super().__init__(
+            placeholder="Select a user to check",
+            min_values=1,
+            max_values=1,
+        )
+
         self.bot = bot
+
+    async def callback(
+        self,
+        interaction: discord.Interaction,
+    ):
+
+        if interaction.guild is None:
+
+            await send_interaction_message(
+                interaction,
+                "This panel only works inside a server.",
+            )
+
+            return
+
+        await acknowledge(
+            interaction
+        )
+
+        target = interaction.guild.get_member(
+            self.values[0].id
+        )
+
+        if target is None:
+
+            try:
+
+                target = await interaction.guild.fetch_member(
+                    self.values[0].id
+                )
+
+            except discord.HTTPException:
+
+                target = None
+
+        if target is None:
+
+            await interaction.followup.send(
+                "I could not find that user.",
+                ephemeral=True,
+            )
+
+            return
+
+        embed = await self.bot.make_profile_embed(
+            interaction.guild,
+            target,
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
+
+
+# ============================================================
+# CHECK MEMBER MODAL
+# ============================================================
+
+class CheckMemberModal(
+    SafeModal
+):
+
+    def __init__(
+        self,
+        bot: VouchBot,
+    ):
+
+        super().__init__(
+            title="Check User"
+        )
+
+        self.bot = bot
+
+        self.value = discord.ui.TextInput(
+            label="Name, mention or ID",
+            required=True,
+            max_length=100,
+        )
+
+        self.add_item(
+            self.value
+        )
 
     async def on_submit(
         self,
         interaction: discord.Interaction,
     ):
+
         if interaction.guild is None:
+
             await send_interaction_message(
                 interaction,
-                "❌ Server only.",
-                ephemeral=True,
+                "This form only works inside a server.",
             )
+
             return
 
         await acknowledge(
-            interaction,
-            ephemeral=True,
+            interaction
         )
 
-        try:
-            target = await self.bot.resolve_member(
-                interaction.guild,
-                str(
-                    self.user_input
-                ).strip(),
-            )
+        member = await self.bot.resolve_member(
+            interaction.guild,
+            str(self.value.value),
+        )
 
-            if target is None:
-                await interaction.followup.send(
-                    "❌ User not found.",
-                    ephemeral=True,
-                )
-                return
-
-            embed = await self.bot.build_profile_embed(
-                interaction.guild,
-                target,
-            )
+        if member is None:
 
             await interaction.followup.send(
-                embed=embed,
+                "I could not find that user.",
                 ephemeral=True,
             )
 
-        except Exception:
-            logger.exception(
-                "Check member modal failed."
-            )
+            return
 
-            await interaction.followup.send(
-                "❌ I couldn't load that profile.",
-                ephemeral=True,
-            )
+        embed = await self.bot.make_profile_embed(
+            interaction.guild,
+            member,
+        )
+
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True,
+        )
 
 
 # ============================================================
@@ -3977,89 +3653,36 @@ class VouchLeaderboardView(
     SafeView
 ):
 
-    PER_PAGE = 10
-
     def __init__(
         self,
         bot: VouchBot,
-        guild: discord.Guild,
-        page: int = 0,
+        page: int,
+        total_pages: int,
     ):
+
         super().__init__(
-            timeout=180
+            timeout=300
         )
 
         self.bot = bot
-        self.guild = guild
         self.page = page
-        self.total_pages = 1
+        self.total_pages = total_pages
 
-        self.previous.disabled = True
-        self.next_page.disabled = True
+        self._update_buttons()
 
-    async def render(self):
-        entries = await self.bot.get_leaderboard_entries(
-            self.guild
-        )
-
-        self.total_pages = max(
-            1,
-            (
-                len(entries)
-                + self.PER_PAGE
-                - 1
-            )
-            // self.PER_PAGE,
-        )
-
-        self.page = max(
-            0,
-            min(
-                self.page,
-                self.total_pages - 1,
-            ),
-        )
-
-        file = await self.bot.make_leaderboard_file(
-            self.guild,
-            entries,
-            self.page,
-            self.total_pages,
-        )
-
-        embed = discord.Embed(
-            color=discord.Color.blurple()
-        )
-
-        embed.set_image(
-            url="attachment://vouch-leaderboard.png"
-        )
-
-        embed.set_footer(
-            text=(
-                f"Page "
-                f"{self.page + 1}/"
-                f"{self.total_pages}"
-                f" • "
-                f"{len(entries)} users"
-            )
-        )
+    def _update_buttons(self):
 
         self.previous.disabled = (
             self.page <= 0
         )
 
         self.next_page.disabled = (
-            self.page >= self.total_pages - 1
-        )
-
-        return (
-            embed,
-            file,
+            self.page
+            >= self.total_pages - 1
         )
 
     @discord.ui.button(
-        label="‹",
+        label="Previous",
         style=discord.ButtonStyle.secondary,
     )
     async def previous(
@@ -4067,88 +3690,91 @@ class VouchLeaderboardView(
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if self.page <= 0:
-            await send_interaction_message(
-                interaction,
-                "❌ You are already on the first page.",
-                ephemeral=True,
-            )
+
+        if interaction.guild is None:
             return
 
-        await acknowledge(
-            interaction,
-            ephemeral=True,
+        # Existing message must be updated, not replaced.
+        await interaction.response.defer(
+            thinking=False
         )
 
-        try:
-            self.page -= 1
+        self.page = max(
+            0,
+            self.page - 1,
+        )
 
-            embed, file = await self.render()
+        (
+            embed,
+            file,
+            total_pages,
+        ) = await self.bot.render_leaderboard(
+            interaction.guild,
+            self.page,
+        )
 
-            if interaction.message is not None:
-                await interaction.message.edit(
-                    embed=embed,
-                    attachments=[file],
-                    view=self,
-                )
+        self.total_pages = total_pages
 
-        except Exception:
-            logger.exception(
-                "Leaderboard previous page failed."
-            )
+        self._update_buttons()
 
-            await interaction.followup.send(
-                "❌ I couldn't change the page.",
-                ephemeral=True,
-            )
+        await interaction.edit_original_response(
+            embed=embed,
+            attachments=(
+                [file]
+                if file is not None
+                else []
+            ),
+            view=self,
+        )
 
     @discord.ui.button(
-        label="›",
-        style=discord.ButtonStyle.secondary,
+        label="Next",
+        style=discord.ButtonStyle.primary,
     )
     async def next_page(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if self.page >= self.total_pages - 1:
-            await send_interaction_message(
-                interaction,
-                "❌ You are already on the last page.",
-                ephemeral=True,
-            )
+
+        if interaction.guild is None:
             return
 
-        await acknowledge(
-            interaction,
-            ephemeral=True,
+        await interaction.response.defer(
+            thinking=False
         )
 
-        try:
-            self.page += 1
+        self.page = min(
+            self.total_pages - 1,
+            self.page + 1,
+        )
 
-            embed, file = await self.render()
+        (
+            embed,
+            file,
+            total_pages,
+        ) = await self.bot.render_leaderboard(
+            interaction.guild,
+            self.page,
+        )
 
-            if interaction.message is not None:
-                await interaction.message.edit(
-                    embed=embed,
-                    attachments=[file],
-                    view=self,
-                )
+        self.total_pages = total_pages
 
-        except Exception:
-            logger.exception(
-                "Leaderboard next page failed."
-            )
+        self._update_buttons()
 
-            await interaction.followup.send(
-                "❌ I couldn't change the page.",
-                ephemeral=True,
-            )
+        await interaction.edit_original_response(
+            embed=embed,
+            attachments=(
+                [file]
+                if file is not None
+                else []
+            ),
+            view=self,
+        )
 
 
 # ============================================================
-# GIVEAWAY VIEW
+# GIVEAWAY JOIN VIEW
 # ============================================================
 
 class GiveawayJoinView(
@@ -4159,20 +3785,27 @@ class GiveawayJoinView(
         self,
         bot: VouchBot,
         message_id: int,
+        disabled: bool = False,
     ):
+
         super().__init__(
             timeout=None
         )
 
         self.bot = bot
-        self.message_id = message_id
+        self.message_id = int(
+            message_id
+        )
 
         button = discord.ui.Button(
-            label="Enter Giveaway",
+            label="Join Giveaway",
+            emoji="🎉",
             style=discord.ButtonStyle.success,
             custom_id=(
-                f"giveaway:enter:{message_id}"
+                f"giveaway:join:"
+                f"{self.message_id}"
             ),
+            disabled=disabled,
         )
 
         button.callback = self.join
@@ -4185,141 +3818,826 @@ class GiveawayJoinView(
         self,
         interaction: discord.Interaction,
     ):
+
         if interaction.guild is None:
-            await send_interaction_message(
-                interaction,
-                "❌ Server only.",
+
+            await interaction.response.send_message(
+                (
+                    "This giveaway is only "
+                    "available in a server."
+                ),
                 ephemeral=True,
             )
+
             return
 
         await acknowledge(
-            interaction,
-            ephemeral=True,
+            interaction
         )
 
-        try:
-            row = await self.bot.db.fetchone(
-                """
-                SELECT status, ends_at
-                FROM giveaway_system
-                WHERE message_id = ?
-                """,
-                (
-                    self.message_id,
-                ),
-            )
+        row = await self.bot.db.fetchone(
+            """
+            SELECT
+                status,
+                ends_at
+            FROM giveaway_system
+            WHERE message_id = ?
+              AND guild_id = ?
+            """,
+            (
+                self.message_id,
+                interaction.guild.id,
+            ),
+        )
 
-            if row is None:
-                await interaction.followup.send(
-                    "❌ Giveaway not found.",
-                    ephemeral=True,
-                )
-                return
-
-            status, ends_at = row
-
-            if (
-                status != "ACTIVE"
-                or float(ends_at) <= now_ts()
-            ):
-                await interaction.followup.send(
-                    "❌ Giveaway has ended.",
-                    ephemeral=True,
-                )
-                return
-
-            inserted = await self.bot.db.execute(
-                """
-                INSERT OR IGNORE INTO giveaway_participants (
-                    message_id,
-                    user_id
-                )
-                VALUES (?, ?)
-                """,
-                (
-                    self.message_id,
-                    interaction.user.id,
-                ),
-            )
-
-            if inserted:
-                await interaction.followup.send(
-                    "✅ You are entered!",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.followup.send(
-                    "❌ You are already entered.",
-                    ephemeral=True,
-                )
-
-        except Exception:
-            logger.exception(
-                "Giveaway join failed."
-            )
+        if not row:
 
             await interaction.followup.send(
-                "❌ I couldn't process the entry.",
+                "This giveaway no longer exists.",
+                ephemeral=True,
+            )
+
+            return
+
+        status, ends_at = row
+
+        if (
+            status != "ACTIVE"
+            or float(ends_at or 0)
+            <= now_ts()
+        ):
+
+            await interaction.followup.send(
+                "This giveaway has already ended.",
+                ephemeral=True,
+            )
+
+            return
+
+        inserted = await self.bot.db.execute(
+            """
+            INSERT OR IGNORE INTO giveaway_participants (
+                message_id,
+                user_id
+            )
+            VALUES (
+                ?,
+                ?
+            )
+            """,
+            (
+                self.message_id,
+                interaction.user.id,
+            ),
+        )
+
+        if inserted == 1:
+
+            await interaction.followup.send(
+                "✅ You are entered in the giveaway!",
+                ephemeral=True,
+            )
+
+        else:
+
+            await interaction.followup.send(
+                "You are already entered in this giveaway.",
                 ephemeral=True,
             )
 
 
 # ============================================================
-# COMMAND REGISTRATION
+# BOT INSTANCE
 # ============================================================
 
 bot = VouchBot()
 
-bot.tree.add_command(
-    bot.vouchpanel_command
+
+# ============================================================
+# GIVEAWAY COMMAND GROUP
+# ============================================================
+
+giveaway_group = app_commands.Group(
+    name="giveaway",
+    description="Create and manage giveaways",
 )
 
 bot.tree.add_command(
-    bot.activity_command
-)
-
-bot.tree.add_command(
-    bot.botstats_command
-)
-
-bot.tree.add_command(
-    bot.say_command
-)
-
-bot.tree.add_command(
-    bot.sync_command
-)
-
-bot.tree.add_command(
-    bot.transactionlog_command
-)
-
-bot.tree.add_command(
-    bot.tempban_command
+    giveaway_group
 )
 
 
 # ============================================================
-# START
+# /VOUCHPANEL
+# ============================================================
+
+@bot.tree.command(
+    name="vouchpanel",
+    description="Post the trust and vouch panel",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(
+    manage_guild=True
+)
+async def vouchpanel(
+    interaction: discord.Interaction,
+):
+
+    await acknowledge(
+        interaction,
+        ephemeral=True,
+    )
+
+    embed = discord.Embed(
+        title="Trust & Vouch System",
+        description=(
+            "Use the buttons below to view trust profiles, "
+            "check vouches, give vouches, view rewards, "
+            "and open the trust leaderboard."
+        ),
+    )
+
+    await interaction.channel.send(
+        embed=embed,
+        view=TrustPanelView(bot),
+    )
+
+    await interaction.followup.send(
+        "✅ Trust panel posted.",
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /ACTIVITY
+# ============================================================
+
+@bot.tree.command(
+    name="activity",
+    description="View a user's activity counters",
+)
+@app_commands.guild_only()
+async def activity(
+    interaction: discord.Interaction,
+    member: Optional[discord.Member] = None,
+):
+
+    await acknowledge(
+        interaction
+    )
+
+    member = (
+        member
+        or interaction.user
+    )
+
+    await bot.ensure_user(
+        interaction.guild.id,
+        member.id,
+    )
+
+    row = await bot.db.fetchone(
+        """
+        SELECT
+            message_count,
+            daily_message_count,
+            week_message_count,
+            month_message_count
+        FROM user_activity
+        WHERE guild_id = ?
+          AND user_id = ?
+        """,
+        (
+            interaction.guild.id,
+            member.id,
+        ),
+    )
+
+    if row:
+
+        (
+            total,
+            daily,
+            weekly,
+            monthly,
+        ) = map(
+            int,
+            row,
+        )
+
+    else:
+
+        total = daily = weekly = monthly = 0
+
+    embed = discord.Embed(
+        title=(
+            f"Activity — "
+            f"{member.display_name}"
+        )
+    )
+
+    embed.add_field(
+        name="Total",
+        value=f"`{total}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Today",
+        value=f"`{daily}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="This Week",
+        value=f"`{weekly}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="This Month",
+        value=f"`{monthly}`",
+        inline=True,
+    )
+
+    await interaction.followup.send(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /BOTSTATS
+# ============================================================
+
+@bot.tree.command(
+    name="botstats",
+    description="View bot status",
+)
+async def botstats(
+    interaction: discord.Interaction,
+):
+
+    await acknowledge(
+        interaction
+    )
+
+    embed = discord.Embed(
+        title="Bot Statistics"
+    )
+
+    embed.add_field(
+        name="Guilds",
+        value=f"`{len(bot.guilds)}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Latency",
+        value=(
+            f"`{round(bot.latency * 1000, 1)} ms`"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Database",
+        value=(
+            "`Connected`"
+            if bot.db.connection
+            else "`Disconnected`"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Python",
+        value=(
+            f"`{os.sys.version.split()[0]}`"
+        ),
+        inline=True,
+    )
+
+    await interaction.followup.send(
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /SAY
+# ============================================================
+
+@bot.tree.command(
+    name="say",
+    description="Send a message as the bot",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(
+    manage_messages=True
+)
+async def say(
+    interaction: discord.Interaction,
+    message: str,
+):
+
+    await acknowledge(
+        interaction
+    )
+
+    await interaction.channel.send(
+        message,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+    await interaction.followup.send(
+        "✅ Message sent.",
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /SYNC
+# ============================================================
+
+@bot.tree.command(
+    name="sync",
+    description="Sync application commands",
+)
+@owner_only()
+async def sync_commands(
+    interaction: discord.Interaction,
+):
+
+    await acknowledge(
+        interaction
+    )
+
+    synced = await bot.tree.sync()
+
+    await interaction.followup.send(
+        (
+            f"✅ Synced "
+            f"{len(synced)} commands."
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /TRANSACTIONLOG
+# ============================================================
+
+@bot.tree.command(
+    name="transactionlog",
+    description="Configure the trust transaction log channel",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(
+    manage_guild=True
+)
+async def transactionlog(
+    interaction: discord.Interaction,
+    channel: Optional[discord.TextChannel] = None,
+):
+
+    await acknowledge(
+        interaction
+    )
+
+    if channel is None:
+
+        row = await bot.db.fetchone(
+            """
+            SELECT channel_id
+            FROM transaction_log_config
+            WHERE guild_id = ?
+            """,
+            (
+                interaction.guild.id,
+            ),
+        )
+
+        if not row:
+
+            await interaction.followup.send(
+                (
+                    "No transaction log "
+                    "channel is configured."
+                ),
+                ephemeral=True,
+            )
+
+            return
+
+        configured = (
+            interaction.guild.get_channel(
+                int(row[0])
+            )
+        )
+
+        await interaction.followup.send(
+            (
+                "Current transaction log: "
+                f"{configured.mention if configured else row[0]}"
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    await bot.db.execute(
+        """
+        INSERT INTO transaction_log_config (
+            guild_id,
+            channel_id
+        )
+        VALUES (
+            ?,
+            ?
+        )
+        ON CONFLICT(
+            guild_id
+        )
+        DO UPDATE SET
+            channel_id = excluded.channel_id
+        """,
+        (
+            interaction.guild.id,
+            channel.id,
+        ),
+    )
+
+    await interaction.followup.send(
+        (
+            "✅ Transaction log set to "
+            f"{channel.mention}."
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /TEMPBAN
+# ============================================================
+
+@bot.tree.command(
+    name="tempban",
+    description="Temporarily ban a member",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(
+    ban_members=True
+)
+async def tempban(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    duration: str,
+    reason: str = "No reason provided.",
+):
+
+    seconds = parse_duration(
+        duration
+    )
+
+    if seconds is None:
+
+        await interaction.response.send_message(
+            (
+                "Invalid duration. "
+                "Examples: `30m`, `2h`, `7d`."
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    await acknowledge(
+        interaction
+    )
+
+    expiry = (
+        now_ts()
+        + seconds
+    )
+
+    await interaction.guild.ban(
+        member,
+        reason=reason[:500],
+        delete_message_seconds=0,
+    )
+
+    await bot.db.execute(
+        """
+        INSERT INTO temporary_bans (
+            guild_id,
+            target_id,
+            expiry_timestamp
+        )
+        VALUES (
+            ?,
+            ?,
+            ?
+        )
+        ON CONFLICT(
+            guild_id,
+            target_id
+        )
+        DO UPDATE SET
+            expiry_timestamp =
+                excluded.expiry_timestamp
+        """,
+        (
+            interaction.guild.id,
+            member.id,
+            expiry,
+        ),
+    )
+
+    await interaction.followup.send(
+        (
+            f"✅ {member} was temporarily banned "
+            f"until {discord_time(expiry)}."
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /GIVEAWAY CREATE
+# ============================================================
+
+@giveaway_group.command(
+    name="create",
+    description="Create a giveaway",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(
+    manage_guild=True
+)
+async def giveaway_create(
+    interaction: discord.Interaction,
+    duration: str,
+    winners: app_commands.Range[int, 1, 50],
+    prize: str,
+    req_daily: app_commands.Range[int, 0, 100000] = 0,
+    req_weekly: app_commands.Range[int, 0, 100000] = 0,
+    req_monthly: app_commands.Range[int, 0, 100000] = 0,
+    req_total: app_commands.Range[int, 0, 1000000] = 0,
+    bypass_role: Optional[discord.Role] = None,
+    end_color: Optional[str] = None,
+):
+
+    seconds = parse_duration(
+        duration
+    )
+
+    if seconds is None:
+
+        await interaction.response.send_message(
+            (
+                "Invalid duration. "
+                "Examples: `30m`, `2h`, `3d`, `1w`."
+            ),
+            ephemeral=True,
+        )
+
+        return
+
+    if len(
+        prize.strip()
+    ) > 200:
+
+        await interaction.response.send_message(
+            "Prize is too long.",
+            ephemeral=True,
+        )
+
+        return
+
+    await acknowledge(
+        interaction,
+        ephemeral=False,
+    )
+
+    ends_at = (
+        now_ts()
+        + seconds
+    )
+
+    host = interaction.user
+
+    color_value = (
+        end_color.strip()
+        if end_color
+        else None
+    )
+
+    embed = discord.Embed(
+        title="🎉 Giveaway",
+        description=(
+            f"**Prize:** {prize}\n"
+            f"**Winners:** `{winners}`\n"
+            f"**Ends:** {discord_time(ends_at)}\n"
+            f"**Hosted by:** {host.mention}"
+        ),
+        colour=parse_color(
+            None
+        ),
+    )
+
+    requirements = []
+
+    if req_daily:
+        requirements.append(
+            f"Daily messages: `{req_daily}`"
+        )
+
+    if req_weekly:
+        requirements.append(
+            f"Weekly messages: `{req_weekly}`"
+        )
+
+    if req_monthly:
+        requirements.append(
+            f"Monthly messages: `{req_monthly}`"
+        )
+
+    if req_total:
+        requirements.append(
+            f"Total messages: `{req_total}`"
+        )
+
+    if bypass_role:
+        requirements.append(
+            f"Bypass role: {bypass_role.mention}"
+        )
+
+    embed.add_field(
+        name="Requirements",
+        value=(
+            "\n".join(
+                requirements
+            )
+            if requirements
+            else "No activity requirements."
+        ),
+        inline=False,
+    )
+
+    message = await interaction.channel.send(
+        embed=embed,
+        view=GiveawayJoinView(
+            bot,
+            0,
+        ),
+    )
+
+    await bot.db.execute(
+        """
+        INSERT INTO giveaway_system (
+            message_id,
+            channel_id,
+            guild_id,
+            prize,
+            ends_at,
+            winners,
+            host_id,
+            status,
+            req_daily,
+            req_weekly,
+            req_monthly,
+            req_total,
+            bypass_role_id,
+            end_color
+        )
+        VALUES (
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            'ACTIVE',
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?
+        )
+        """,
+        (
+            message.id,
+            message.channel.id,
+            interaction.guild.id,
+            prize.strip(),
+            ends_at,
+            winners,
+            host.id,
+            req_daily,
+            req_weekly,
+            req_monthly,
+            req_total,
+            (
+                bypass_role.id
+                if bypass_role
+                else 0
+            ),
+            color_value,
+        ),
+    )
+
+    await message.edit(
+        view=GiveawayJoinView(
+            bot,
+            message.id,
+        )
+    )
+
+    await interaction.followup.send(
+        (
+            f"✅ Giveaway created: "
+            f"{message.jump_url}"
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# /GIVEAWAY END
+# ============================================================
+
+@giveaway_group.command(
+    name="end",
+    description="End a giveaway now",
+)
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(
+    manage_guild=True
+)
+async def giveaway_end(
+    interaction: discord.Interaction,
+    message_id: str,
+):
+
+    if not message_id.isdigit():
+
+        await interaction.response.send_message(
+            "Message ID must be a number.",
+            ephemeral=True,
+        )
+
+        return
+
+    await acknowledge(
+        interaction
+    )
+
+    success = await bot.finish_giveaway(
+        int(message_id),
+        "manual command",
+    )
+
+    await interaction.followup.send(
+        (
+            "✅ Giveaway ended."
+            if success
+            else
+            "The giveaway could not be ended "
+            "(already ended, missing, or failed)."
+        ),
+        ephemeral=True,
+    )
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 async def main():
+
     if not DISCORD_TOKEN:
+
         raise RuntimeError(
-            "DISCORD_TOKEN is missing."
+            "DISCORD_TOKEN is missing from the environment."
         )
 
-    async with bot:
+    try:
+
         await bot.start(
             DISCORD_TOKEN
         )
 
+    finally:
+
+        if not bot.is_closed():
+
+            await bot.close()
+
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(
-            main()
+    asyncio.run(
+        main()
         )
-    except KeyboardInterrupt:
-        pass
