@@ -42,8 +42,6 @@ PORT = int(os.getenv("PORT", "10000"))
 if os.getenv("DATABASE_PATH"):
     DATABASE_PATH = os.getenv("DATABASE_PATH")
 else:
-    # Render's /data directory only exists when a persistent disk is mounted.
-    # The project directory is writable on a normal Render service.
     DATABASE_PATH = os.path.join(os.getcwd(), "bot_database.db")
 
 TRADER_ROLE_ID = 1529114068412141639
@@ -79,7 +77,6 @@ def clamp(value: int, minimum: int = 0, maximum: int = 100) -> int:
 
 
 def parse_duration(value: str) -> Optional[int]:
-    """Accept 30, 30s, 10m, 2h, 1d and return seconds."""
     value = value.strip().lower()
     if not value:
         return None
@@ -92,7 +89,7 @@ def parse_duration(value: str) -> Optional[int]:
     unit = match.group(2)
 
     multiplier = {
-        "": 60,   # bare numbers are minutes
+        "": 60,
         "s": 1,
         "m": 60,
         "h": 3600,
@@ -141,16 +138,12 @@ class GiveawayTrustBot(discord.Client):
     async def setup_hook(self):
         await self.db.initialize_database()
 
-        # Old versions created new profiles at 25. Reset only untouched legacy
-        # default profiles; users who already earned a different score keep it.
         await self.db.execute(
             "UPDATE user_vouch_network SET trust_score = 0 WHERE trust_score = 25 AND vouches_given = 0 AND vouch_positive = 0 AND vouch_negative = 0"
         )
 
-        # Persistent Trust panel.
         self.add_view(TrustPanelView(self))
 
-        # Recover giveaways after restarts.
         await self.db.execute(
             """
             UPDATE giveaway_system
@@ -202,7 +195,6 @@ class GiveawayTrustBot(discord.Client):
             self.ready_once = True
             logger.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "?")
 
-            # Give existing non-bot guild members the default 0 Trust profile.
             for guild in self.guilds:
                 await self.ensure_guild_trust_users(guild)
 
@@ -429,7 +421,6 @@ class GiveawayTrustBot(discord.Client):
         image = Image.new("RGB", (width, height), (15, 17, 24))
         draw = ImageDraw.Draw(image)
 
-        # Header
         draw.rounded_rectangle((40, 35, width - 40, 155), radius=28, fill=(28, 32, 45), outline=(70, 78, 100), width=2)
         draw.text((75, 58), "VOUCH LEADERBOARD", font=self._font(42, True), fill=(245, 247, 250))
         draw.text((78, 112), f"{guild.name}  •  Page {page + 1}/{total_pages}", font=self._font(22), fill=(160, 168, 185))
@@ -1260,7 +1251,6 @@ class GiveawayTrustBot(discord.Client):
             )
             return
 
-        # FIXED: Zorg ervoor dat Discord direct wordt gedefereerd zodat de 3-seconden timeout niet optreedt
         await interaction.response.defer(ephemeral=True)
 
         ends_at = now_timestamp() + seconds
@@ -1722,8 +1712,6 @@ class TrustPanelView(discord.ui.View):
             )
             return
 
-        # FIXED: De leaderboard maakt een afbeelding via Pillow (wat langer kan duren). 
-        # Door direct te deferren voorkomen we een "Application did not respond" timeout.
         await interaction.response.defer(ephemeral=True)
         view = VouchLeaderboardView(
             self.bot,
@@ -2118,7 +2106,8 @@ class CheckMemberView(discord.ui.View):
 
     async def user_select_callback(self, interaction: discord.Interaction):
         if interaction.guild is None:
-            await interaction.response.send_message(z
+            # Gecorrigeerd: de losse 'z' is hier verwijderd
+            await interaction.response.send_message(
                 "❌ This action only works inside a server.",
                 ephemeral=True,
             )
