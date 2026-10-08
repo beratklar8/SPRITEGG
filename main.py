@@ -49,11 +49,6 @@ BOT_OWNER_ID = int(
     os.getenv("BOT_OWNER_ID", "0") or 0
 )
 
-ENVIRONMENT = os.getenv(
-    "ENVIRONMENT",
-    "development",
-).lower().strip()
-
 GROQ_MODEL = os.getenv(
     "GROQ_MODEL",
     "llama-3.3-70b-versatile",
@@ -63,6 +58,7 @@ PORT = int(
     os.getenv("PORT", "10000") or 10000
 )
 
+# Existing role IDs - DO NOT CHANGE
 ROLE_50_ID = 1529114068412141639
 ROLE_100_ID = 1529114203204489277
 
@@ -82,21 +78,27 @@ intents.message_content = True
 # =========================================================
 
 def get_database_path() -> str:
+
     configured = os.getenv(
         "DATABASE_PATH",
         "",
     ).strip()
 
     if configured:
+
         requested = Path(configured)
 
         try:
+
             requested.parent.mkdir(
                 parents=True,
                 exist_ok=True,
             )
 
-            test_file = requested.parent / ".db_write_test"
+            test_file = (
+                requested.parent
+                / ".database_write_test"
+            )
 
             with open(
                 test_file,
@@ -112,15 +114,20 @@ def get_database_path() -> str:
 
             return str(requested)
 
-        except (PermissionError, OSError):
+        except (
+            PermissionError,
+            OSError,
+        ):
+
             logger.warning(
-                "DATABASE_PATH '%s' is not writable. "
-                "Using local fallback database.",
+                "Database path '%s' is not writable. "
+                "Using local database.",
                 configured,
             )
 
     return str(
-        Path.cwd() / "bot_database.db"
+        Path.cwd()
+        / "bot_database.db"
     )
 
 
@@ -140,29 +147,33 @@ def now_timestamp() -> int:
     return int(time.time())
 
 
-def format_timestamp(
-    timestamp: int | float | None,
-) -> str:
-    if not timestamp:
-        return "Unknown"
-
-    return datetime.fromtimestamp(
-        float(timestamp),
-        tz=timezone.utc,
-    ).strftime("%Y-%m-%d %H:%M UTC")
-
-
 def clamp(
     value: int,
-    minimum: int,
-    maximum: int,
+    minimum: int = 0,
+    maximum: int = 100,
 ) -> int:
+
     return max(
         minimum,
         min(
             maximum,
             value,
         ),
+    )
+
+
+def format_timestamp(
+    timestamp: int | float | None,
+) -> str:
+
+    if not timestamp:
+        return "Unknown"
+
+    return datetime.fromtimestamp(
+        float(timestamp),
+        tz=timezone.utc,
+    ).strftime(
+        "%d %b %Y • %H:%M UTC"
     )
 
 
@@ -178,7 +189,10 @@ def parse_duration(
     if not match:
         return None
 
-    amount = int(match.group(1))
+    amount = int(
+        match.group(1)
+    )
+
     unit = match.group(2)
 
     multipliers = {
@@ -189,7 +203,10 @@ def parse_duration(
         "w": 604800,
     }
 
-    seconds = amount * multipliers[unit]
+    seconds = (
+        amount
+        * multipliers[unit]
+    )
 
     if seconds <= 0:
         return None
@@ -200,6 +217,41 @@ def parse_duration(
     return seconds
 
 
+def trust_bar(
+    trust: int,
+    width: int = 18,
+) -> str:
+
+    trust = clamp(trust)
+
+    filled = round(
+        (trust / 100)
+        * width
+    )
+
+    empty = width - filled
+
+    return (
+        "▰" * filled
+        + "▱" * empty
+    )
+
+
+def trust_label(
+    trust: int,
+) -> str:
+
+    trust = clamp(trust)
+
+    if trust >= 100:
+        return "Master Trader"
+
+    if trust >= 50:
+        return "Trader"
+
+    return "Building Trust"
+
+
 def owner_only():
 
     async def predicate(
@@ -208,7 +260,8 @@ def owner_only():
 
         return (
             BOT_OWNER_ID > 0
-            and interaction.user.id == BOT_OWNER_ID
+            and interaction.user.id
+            == BOT_OWNER_ID
         )
 
     return app_commands.check(
@@ -262,8 +315,6 @@ class DatabaseController:
 
         self.lock = asyncio.Lock()
 
-    # -----------------------------------------------------
-
     async def connect(self):
 
         if self.db is not None:
@@ -297,8 +348,6 @@ class DatabaseController:
         )
 
         await self.db.commit()
-
-    # -----------------------------------------------------
 
     async def init(self):
 
@@ -394,6 +443,9 @@ class DatabaseController:
                 CREATE INDEX IF NOT EXISTS idx_trust_leaderboard
                 ON trust_users(guild_id, trust DESC);
 
+                CREATE INDEX IF NOT EXISTS idx_vouch_history_target
+                ON vouch_history(guild_id, target_id, created_at DESC);
+
                 CREATE INDEX IF NOT EXISTS idx_giveaway_status
                 ON giveaway_system(status, end_at);
 
@@ -404,8 +456,6 @@ class DatabaseController:
 
             await self.db.commit()
 
-    # -----------------------------------------------------
-
     async def close(self):
 
         if self.db is not None:
@@ -414,8 +464,6 @@ class DatabaseController:
                 await self.db.close()
             finally:
                 self.db = None
-
-    # -----------------------------------------------------
 
     async def execute(
         self,
@@ -435,8 +483,6 @@ class DatabaseController:
             await self.db.commit()
 
             return cursor
-
-    # -----------------------------------------------------
 
     async def fetchone(
         self,
@@ -459,8 +505,6 @@ class DatabaseController:
 
             return row
 
-    # -----------------------------------------------------
-
     async def fetchall(
         self,
         query: str,
@@ -481,8 +525,6 @@ class DatabaseController:
             await cursor.close()
 
             return rows
-
-    # -----------------------------------------------------
 
     async def ensure_trust_user(
         self,
@@ -529,8 +571,6 @@ class DatabaseController:
             ),
         )
 
-    # -----------------------------------------------------
-
     async def get_trust_user(
         self,
         guild_id: int,
@@ -555,7 +595,148 @@ class DatabaseController:
             ),
         )
 
-    # -----------------------------------------------------
+    async def get_vouch_counts(
+        self,
+        guild_id: int,
+        user_id: int,
+    ) -> tuple[int, int]:
+
+        row = await self.fetchone(
+            """
+            SELECT
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN amount > 0 THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS positive,
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN amount < 0 THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS negative
+            FROM vouch_history
+            WHERE guild_id = ?
+              AND target_id = ?
+            """,
+            (
+                guild_id,
+                user_id,
+            ),
+        )
+
+        if not row:
+            return 0, 0
+
+        return (
+            int(row["positive"] or 0),
+            int(row["negative"] or 0),
+        )
+
+    async def get_vouch_history(
+        self,
+        guild_id: int,
+        user_id: int,
+        limit: int = 5,
+    ):
+
+        return await self.fetchall(
+            """
+            SELECT
+                giver_id,
+                amount,
+                reason,
+                created_at
+            FROM vouch_history
+            WHERE guild_id = ?
+              AND target_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (
+                guild_id,
+                user_id,
+                limit,
+            ),
+        )
+
+    async def get_user_rank(
+        self,
+        guild_id: int,
+        user_id: int,
+    ) -> tuple[int, int]:
+
+        member_count_row = (
+            await self.fetchone(
+                """
+                SELECT COUNT(*) AS total
+                FROM trust_users
+                WHERE guild_id = ?
+                """,
+                (guild_id,),
+            )
+        )
+
+        total = int(
+            member_count_row["total"]
+            if member_count_row
+            else 0
+        )
+
+        rank_row = await self.fetchone(
+            """
+            SELECT COUNT(*) + 1 AS rank
+            FROM trust_users AS t
+            WHERE t.guild_id = ?
+              AND (
+                    t.trust > (
+                        SELECT trust
+                        FROM trust_users
+                        WHERE guild_id = ?
+                          AND user_id = ?
+                    )
+                    OR
+                    (
+                        t.trust = (
+                            SELECT trust
+                            FROM trust_users
+                            WHERE guild_id = ?
+                              AND user_id = ?
+                        )
+                        AND t.vouches_received > (
+                            SELECT vouches_received
+                            FROM trust_users
+                            WHERE guild_id = ?
+                              AND user_id = ?
+                        )
+                    )
+              )
+            """,
+            (
+                guild_id,
+                guild_id,
+                user_id,
+                guild_id,
+                user_id,
+                guild_id,
+                user_id,
+            ),
+        )
+
+        rank = int(
+            rank_row["rank"]
+            if rank_row
+            else 1
+        )
+
+        return rank, total
 
     async def create_vouch(
         self,
@@ -637,7 +818,7 @@ class DatabaseController:
                         target_id,
                         giver_id,
                         amount,
-                        reason[:200],
+                        reason[:300],
                         timestamp,
                     ),
                 )
@@ -672,9 +853,7 @@ class DatabaseController:
                 )
 
                 new_trust = clamp(
-                    current_trust + amount,
-                    0,
-                    100,
+                    current_trust + amount
                 )
 
                 await self.db.execute(
@@ -819,8 +998,8 @@ class GiveawayTrustBot(discord.Client):
             intents=intents
         )
 
-        self.tree = app_commands.CommandTree(
-            self
+        self.tree = (
+            app_commands.CommandTree(self)
         )
 
         self.db = DatabaseController(
@@ -843,30 +1022,16 @@ class GiveawayTrustBot(discord.Client):
             except Exception:
 
                 logger.exception(
-                    "Groq initialization failed"
+                    "Could not initialize Groq"
                 )
 
         self.health_runner = None
         self.health_site = None
 
-    # =====================================================
-    # SETUP
-    # =====================================================
-
     async def setup_hook(self):
-
-        logger.info(
-            "Initializing database..."
-        )
 
         await self.db.init()
 
-        logger.info(
-            "Database initialized."
-        )
-
-        # Keep the old persistent custom IDs so
-        # already posted panels continue working.
         self.add_view(
             TrustPanelView(self)
         )
@@ -889,19 +1054,15 @@ class GiveawayTrustBot(discord.Client):
             synced = await self.tree.sync()
 
             logger.info(
-                "Synced %s application commands.",
+                "Synced %s application command(s).",
                 len(synced),
             )
 
         except Exception:
 
             logger.exception(
-                "Application command sync failed"
+                "Command sync failed"
             )
-
-    # =====================================================
-    # READY
-    # =====================================================
 
     async def on_ready(self):
 
@@ -927,14 +1088,9 @@ class GiveawayTrustBot(discord.Client):
             except Exception:
 
                 logger.exception(
-                    "Could not initialize trust users "
-                    "for guild %s",
+                    "Could not initialize guild %s",
                     guild.id,
                 )
-
-    # =====================================================
-    # CLOSE
-    # =====================================================
 
     async def close(self):
 
@@ -963,13 +1119,11 @@ class GiveawayTrustBot(discord.Client):
             self.health_site = None
 
         try:
-
             await self.db.close()
-
         except Exception:
 
             logger.exception(
-                "Database close failed"
+                "Could not close database"
             )
 
         await super().close()
@@ -1000,8 +1154,8 @@ class GiveawayTrustBot(discord.Client):
             self.health_root,
         )
 
-        self.health_runner = web.AppRunner(
-            app
+        self.health_runner = (
+            web.AppRunner(app)
         )
 
         await self.health_runner.setup()
@@ -1084,7 +1238,7 @@ class GiveawayTrustBot(discord.Client):
         )
 
     # =====================================================
-    # RESOLVE MEMBER
+    # MEMBER RESOLVE
     # =====================================================
 
     async def resolve_member(
@@ -1137,9 +1291,11 @@ class GiveawayTrustBot(discord.Client):
                 continue
 
             if (
-                member.name.lower() == lowered
+                member.name.lower()
+                == lowered
                 or
-                member.display_name.lower() == lowered
+                member.display_name.lower()
+                == lowered
             ):
 
                 return member
@@ -1147,7 +1303,7 @@ class GiveawayTrustBot(discord.Client):
         return None
 
     # =====================================================
-    # TRUST ROLES
+    # ROLES
     # =====================================================
 
     async def update_trust_roles(
@@ -1205,7 +1361,7 @@ class GiveawayTrustBot(discord.Client):
             )
 
     # =====================================================
-    # PROFILE
+    # PROFILE EMBED
     # =====================================================
 
     async def build_profile_embed(
@@ -1219,29 +1375,54 @@ class GiveawayTrustBot(discord.Client):
             member.id,
         )
 
-        trust = int(
-            row["trust"]
-            if row
-            else 25
+        if row is None:
+
+            trust = 25
+            given = 0
+            received = 0
+
+        else:
+
+            trust = int(
+                row["trust"]
+            )
+
+            given = int(
+                row["vouches_given"]
+            )
+
+            received = int(
+                row["vouches_received"]
+            )
+
+        positive, negative = (
+            await self.db.get_vouch_counts(
+                guild.id,
+                member.id,
+            )
         )
 
-        given = int(
-            row["vouches_given"]
-            if row
-            else 0
+        rank, total = (
+            await self.db.get_user_rank(
+                guild.id,
+                member.id,
+            )
         )
 
-        received = int(
-            row["vouches_received"]
-            if row
-            else 0
+        history = (
+            await self.db.get_vouch_history(
+                guild.id,
+                member.id,
+                4,
+            )
         )
 
         embed = discord.Embed(
-            title=(
-                f"{member.display_name}'s "
-                "Vouch Profile"
-            )
+            title="Trader Profile",
+            description=(
+                f"{member.mention}\n"
+                f"**{trust_label(trust)}**"
+            ),
         )
 
         embed.set_thumbnail(
@@ -1249,25 +1430,105 @@ class GiveawayTrustBot(discord.Client):
         )
 
         embed.add_field(
-            name="Trust",
-            value=f"**{trust}/100**",
+            name="Trust Score",
+            value=(
+                f"**{trust} / 100**\n"
+                f"`{trust_bar(trust)}`\n"
+                f"{max(0, 100 - trust)} points until 100"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Standing",
+            value=(
+                f"Rank **#{rank}**"
+                f"{f' of {total}' if total else ''}"
+            ),
             inline=True,
         )
 
         embed.add_field(
-            name="Vouches Given",
-            value=str(given),
+            name="Feedback",
+            value=(
+                f"+Vouch **{positive}**\n"
+                f"-Vouch **{negative}**"
+            ),
             inline=True,
         )
 
         embed.add_field(
-            name="Vouches Received",
-            value=str(received),
+            name="Activity",
+            value=(
+                f"Given **{given}**\n"
+                f"Received **{received}**"
+            ),
             inline=True,
         )
+
+        if history:
+
+            history_lines = []
+
+            for entry in history:
+
+                giver = guild.get_member(
+                    int(entry["giver_id"])
+                )
+
+                giver_name = (
+                    giver.display_name
+                    if giver
+                    else f"User {entry['giver_id']}"
+                )
+
+                symbol = (
+                    "+Vouch"
+                    if int(entry["amount"]) > 0
+                    else "-Vouch"
+                )
+
+                reason = (
+                    entry["reason"]
+                    or "No reason provided"
+                )
+
+                reason = reason.replace(
+                    "\n",
+                    " ",
+                )[:90]
+
+                history_lines.append(
+                    (
+                        f"**{symbol}** · "
+                        f"{giver_name}\n"
+                        f"{reason}"
+                    )
+                )
+
+            embed.add_field(
+                name="Recent Feedback",
+                value="\n\n".join(
+                    history_lines
+                )[:1024],
+                inline=False,
+            )
+
+        else:
+
+            embed.add_field(
+                name="Recent Feedback",
+                value=(
+                    "No feedback yet.\n"
+                    "Complete trades and build your trust history."
+                ),
+                inline=False,
+            )
 
         embed.set_footer(
-            text="Trust starts at 25/100"
+            text=(
+                "Trust is built through real trades."
+            )
         )
 
         return embed
@@ -1284,9 +1545,7 @@ class GiveawayTrustBot(discord.Client):
         reason: str,
     ):
 
-        guild = interaction.guild
-
-        if guild is None:
+        if interaction.guild is None:
 
             return await interaction.response.send_message(
                 "This can only be used in a server.",
@@ -1315,7 +1574,7 @@ class GiveawayTrustBot(discord.Client):
 
             created, trust = (
                 await self.db.create_vouch(
-                    guild.id,
+                    interaction.guild.id,
                     target.id,
                     interaction.user.id,
                     5 if amount > 0 else -5,
@@ -1326,8 +1585,7 @@ class GiveawayTrustBot(discord.Client):
             if not created:
 
                 return await interaction.followup.send(
-                    "You have already vouched this user. "
-                    "You can only vouch the same user once.",
+                    "You have already vouched this user.",
                     ephemeral=True,
                 )
 
@@ -1336,32 +1594,49 @@ class GiveawayTrustBot(discord.Client):
                 trust,
             )
 
-            direction = (
-                "+Vouch"
-                if amount > 0
-                else "-Vouch"
+            positive, negative = (
+                await self.db.get_vouch_counts(
+                    interaction.guild.id,
+                    target.id,
+                )
             )
+
+            if amount > 0:
+
+                heading = "Vouch Added"
+                accent = "Positive feedback recorded."
+
+            else:
+
+                heading = "Vouch Updated"
+                accent = "Negative feedback recorded."
 
             embed = discord.Embed(
-                title=f"{direction} recorded",
+                title=heading,
                 description=(
-                    f"{target.mention} now has "
-                    f"**{trust}/100 Trust**."
-                ),
-                timestamp=datetime.now(
-                    timezone.utc
+                    f"{target.mention}\n"
+                    f"{accent}\n\n"
+                    f"**{trust} / 100 Trust**\n"
+                    f"`{trust_bar(trust)}`"
                 ),
             )
 
             embed.add_field(
-                name="Given by",
-                value=interaction.user.mention,
+                name="+Vouch",
+                value=str(positive),
+                inline=True,
             )
 
             embed.add_field(
-                name="Reason",
+                name="-Vouch",
+                value=str(negative),
+                inline=True,
+            )
+
+            embed.add_field(
+                name="Why",
                 value=(
-                    reason[:200]
+                    reason[:300]
                     if reason
                     else "No reason provided"
                 ),
@@ -1374,7 +1649,7 @@ class GiveawayTrustBot(discord.Client):
             )
 
             await self.send_transaction_log(
-                guild,
+                interaction.guild,
                 embed,
             )
 
@@ -1410,10 +1685,7 @@ class GiveawayTrustBot(discord.Client):
                 (guild.id,),
             )
 
-            if not row:
-                return
-
-            if not row["enabled"]:
+            if not row or not row["enabled"]:
                 return
 
             channel = guild.get_channel(
@@ -1424,8 +1696,10 @@ class GiveawayTrustBot(discord.Client):
 
                 try:
 
-                    channel = await self.fetch_channel(
-                        int(row["channel_id"])
+                    channel = (
+                        await self.fetch_channel(
+                            int(row["channel_id"])
+                        )
                     )
 
                 except discord.HTTPException:
@@ -1443,7 +1717,7 @@ class GiveawayTrustBot(discord.Client):
             )
 
     # =====================================================
-    # GIVEAWAY RECORD
+    # GIVEAWAYS
     # =====================================================
 
     async def create_giveaway_record(
@@ -1488,11 +1762,9 @@ class GiveawayTrustBot(discord.Client):
             cursor.lastrowid
         )
 
-    # =====================================================
-    # RECOVER GIVEAWAYS
-    # =====================================================
-
-    async def recover_giveaways(self):
+    async def recover_giveaways(
+        self,
+    ):
 
         try:
 
@@ -1531,10 +1803,6 @@ class GiveawayTrustBot(discord.Client):
                 "Could not recover giveaways"
             )
 
-    # =====================================================
-    # FINISH GIVEAWAY
-    # =====================================================
-
     async def finish_giveaway(
         self,
         giveaway_id: int,
@@ -1564,13 +1832,15 @@ class GiveawayTrustBot(discord.Client):
                 (giveaway_id,),
             )
 
-            participants = await self.db.fetchall(
-                """
-                SELECT user_id
-                FROM giveaway_participants
-                WHERE giveaway_id = ?
-                """,
-                (giveaway_id,),
+            participants = (
+                await self.db.fetchall(
+                    """
+                    SELECT user_id
+                    FROM giveaway_participants
+                    WHERE giveaway_id = ?
+                    """,
+                    (giveaway_id,),
+                )
             )
 
             user_ids = [
@@ -1590,7 +1860,7 @@ class GiveawayTrustBot(discord.Client):
                     user_ids,
                     winner_count,
                 )
-                if winner_count > 0
+                if winner_count
                 else []
             )
 
@@ -1659,10 +1929,7 @@ class GiveawayTrustBot(discord.Client):
                         try:
 
                             await channel.send(
-                                (
-                                    "🎉 Giveaway winner(s): "
-                                    f"{winner_text}"
-                                )
+                                f"🎉 Giveaway winner(s): {winner_text}"
                             )
 
                         except discord.HTTPException:
@@ -1722,17 +1989,19 @@ class GiveawayTrustBot(discord.Client):
             except Exception:
 
                 logger.exception(
-                    "Could not restore giveaway status"
+                    "Could not restore giveaway"
                 )
 
             return False
 
     # =====================================================
-    # GIVEAWAY LOOP
+    # LOOPS
     # =====================================================
 
     @tasks.loop(seconds=5)
-    async def giveaway_loop(self):
+    async def giveaway_loop(
+        self,
+    ):
 
         try:
 
@@ -1759,7 +2028,7 @@ class GiveawayTrustBot(discord.Client):
                 except Exception:
 
                     logger.exception(
-                        "Giveaway processing failed: %s",
+                        "Giveaway item failed: %s",
                         row["id"],
                     )
 
@@ -1770,16 +2039,16 @@ class GiveawayTrustBot(discord.Client):
             )
 
     @giveaway_loop.before_loop
-    async def before_giveaway_loop(self):
+    async def before_giveaway_loop(
+        self,
+    ):
 
         await self.wait_until_ready()
 
-    # =====================================================
-    # TEMP BAN LOOP
-    # =====================================================
-
     @tasks.loop(seconds=15)
-    async def temp_ban_loop(self):
+    async def temp_ban_loop(
+        self,
+    ):
 
         try:
 
@@ -1841,20 +2110,23 @@ class GiveawayTrustBot(discord.Client):
             )
 
     @temp_ban_loop.before_loop
-    async def before_temp_ban_loop(self):
+    async def before_temp_ban_loop(
+        self,
+    ):
 
         await self.wait_until_ready()
 
-    # =====================================================
-    # ACTIVITY LOOP
-    # =====================================================
-
     @tasks.loop(seconds=60)
-    async def activity_loop(self):
-        pass
+    async def activity_loop(
+        self,
+    ):
+
+        return
 
     @activity_loop.before_loop
-    async def before_activity_loop(self):
+    async def before_activity_loop(
+        self,
+    ):
 
         await self.wait_until_ready()
 
@@ -1916,7 +2188,7 @@ class GiveawayTrustBot(discord.Client):
             return None
 
     # =====================================================
-    # MEMBER JOIN
+    # EVENTS
     # =====================================================
 
     async def on_member_join(
@@ -1934,12 +2206,8 @@ class GiveawayTrustBot(discord.Client):
         except Exception:
 
             logger.exception(
-                "Member trust initialization failed"
+                "Member join database error"
             )
-
-    # =====================================================
-    # MESSAGE
-    # =====================================================
 
     async def on_message(
         self,
@@ -1962,7 +2230,7 @@ class GiveawayTrustBot(discord.Client):
             except Exception:
 
                 logger.exception(
-                    "Message activity failed"
+                    "Activity recording failed"
                 )
 
         if (
@@ -2003,10 +2271,12 @@ class GiveawayTrustBot(discord.Client):
 
 
 # =========================================================
-# TRUST PANEL
+# MAIN TRUST PANEL
 # =========================================================
 
-class TrustPanelView(SafeView):
+class TrustPanelView(
+    SafeView
+):
 
     def __init__(
         self,
@@ -2021,13 +2291,13 @@ class TrustPanelView(SafeView):
 
     # =====================================================
     # MY PROFILE
-    # IMPORTANT: old custom_id retained so old panels work.
     # =====================================================
 
     @discord.ui.button(
         label="My Profile",
         style=discord.ButtonStyle.primary,
         custom_id="trust:check_me",
+        row=0,
     )
     async def check_me(
         self,
@@ -2075,7 +2345,7 @@ class TrustPanelView(SafeView):
         except Exception:
 
             logger.exception(
-                "My Profile failed"
+                "My Profile interaction failed"
             )
 
             await interaction.followup.send(
@@ -2088,9 +2358,10 @@ class TrustPanelView(SafeView):
     # =====================================================
 
     @discord.ui.button(
-        label="Check User's Vouch",
+        label="Inspect Trader",
         style=discord.ButtonStyle.secondary,
         custom_id="trust:check_user",
+        row=0,
     )
     async def check_user(
         self,
@@ -2099,7 +2370,7 @@ class TrustPanelView(SafeView):
     ):
 
         await interaction.response.send_message(
-            "Choose a user below:",
+            "Select the trader you want to inspect.",
             view=CheckMemberView(
                 self.bot
             ),
@@ -2107,13 +2378,14 @@ class TrustPanelView(SafeView):
         )
 
     # =====================================================
-    # VOUCH USER
+    # VOUCH A USER
     # =====================================================
 
     @discord.ui.button(
-        label="Vouch A User",
+        label="Give Trust",
         style=discord.ButtonStyle.success,
         custom_id="trust:vouch_user",
+        row=0,
     )
     async def vouch_user(
         self,
@@ -2122,7 +2394,7 @@ class TrustPanelView(SafeView):
     ):
 
         await interaction.response.send_message(
-            "Choose a user below:",
+            "Select the person you traded with.",
             view=VouchTargetView(
                 self.bot
             ),
@@ -2134,9 +2406,10 @@ class TrustPanelView(SafeView):
     # =====================================================
 
     @discord.ui.button(
-        label="Vouch Rewards",
+        label="Trust Guide",
         style=discord.ButtonStyle.secondary,
         custom_id="trust:rewards",
+        row=1,
     )
     async def rewards(
         self,
@@ -2145,13 +2418,40 @@ class TrustPanelView(SafeView):
     ):
 
         embed = discord.Embed(
-            title="Vouch Rewards",
+            title="Trust Guide",
             description=(
-                "Trust runs from 0 to 100.\n"
-                "Two roles, both automatic:\n\n"
-                f"• **50** · <@&{ROLE_50_ID}>\n"
-                f"• **100** · <@&{ROLE_100_ID}>"
+                "**50**\n"
+                "Trader\n\n"
+                "**100**\n"
+                "Master Trader"
             ),
+        )
+
+        embed.add_field(
+            name="Building your score",
+            value=(
+                "Your Trust score starts at 25. "
+                "Real trade feedback changes your score."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Feedback",
+            value=(
+                "Use positive feedback when a trade went well. "
+                "Use negative feedback when there is a genuine problem."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Good practice",
+            value=(
+                "Only leave feedback for trades that actually happened. "
+                "Fake or revenge feedback can be reviewed by staff."
+            ),
+            inline=False,
         )
 
         await interaction.response.send_message(
@@ -2161,13 +2461,13 @@ class TrustPanelView(SafeView):
 
     # =====================================================
     # LEADERBOARD
-    # IMPORTANT: old custom_id retained.
     # =====================================================
 
     @discord.ui.button(
-        label="Vouch Leaderboard",
+        label="Trust Rankings",
         style=discord.ButtonStyle.primary,
         custom_id="trust:leaderboard",
+        row=1,
     )
     async def leaderboard(
         self,
@@ -2188,13 +2488,15 @@ class TrustPanelView(SafeView):
 
         try:
 
-            view = VouchLeaderboardView(
+            view = TrustLeaderboardView(
                 self.bot,
                 interaction.guild,
                 0,
             )
 
-            embed = await view.build_embed()
+            embed = (
+                await view.build_embed()
+            )
 
             await interaction.followup.send(
                 embed=embed,
@@ -2205,11 +2507,11 @@ class TrustPanelView(SafeView):
         except Exception:
 
             logger.exception(
-                "Vouch Leaderboard failed"
+                "Trust leaderboard failed"
             )
 
             await interaction.followup.send(
-                "Could not load the leaderboard.",
+                "Could not load Trust Rankings.",
                 ephemeral=True,
             )
 
@@ -2218,7 +2520,9 @@ class TrustPanelView(SafeView):
 # CHECK MEMBER VIEW
 # =========================================================
 
-class CheckMemberView(SafeView):
+class CheckMemberView(
+    SafeView
+):
 
     def __init__(
         self,
@@ -2231,10 +2535,12 @@ class CheckMemberView(SafeView):
 
         self.bot = bot
 
-        self.user_select = discord.ui.UserSelect(
-            placeholder="Select a user",
-            min_values=1,
-            max_values=1,
+        self.user_select = (
+            discord.ui.UserSelect(
+                placeholder="Select a trader",
+                min_values=1,
+                max_values=1,
+            )
         )
 
         self.user_select.callback = (
@@ -2246,7 +2552,7 @@ class CheckMemberView(SafeView):
         )
 
         button = discord.ui.Button(
-            label="Enter User ID / Name",
+            label="Search by ID / Name",
             style=discord.ButtonStyle.secondary,
         )
 
@@ -2269,7 +2575,7 @@ class CheckMemberView(SafeView):
 
         try:
 
-            if not interaction.guild:
+            if interaction.guild is None:
 
                 return await interaction.followup.send(
                     "This can only be used in a server.",
@@ -2277,6 +2583,13 @@ class CheckMemberView(SafeView):
                 )
 
             member = self.user_select.values[0]
+
+            if member.bot:
+
+                return await interaction.followup.send(
+                    "Bots do not have a trading profile.",
+                    ephemeral=True,
+                )
 
             embed = (
                 await self.bot.build_profile_embed(
@@ -2293,11 +2606,11 @@ class CheckMemberView(SafeView):
         except Exception:
 
             logger.exception(
-                "CheckMember UserSelect failed"
+                "Inspect trader select failed"
             )
 
             await interaction.followup.send(
-                "Could not load that profile.",
+                "Could not load that trader.",
                 ephemeral=True,
             )
 
@@ -2317,12 +2630,15 @@ class CheckMemberView(SafeView):
 # CHECK MEMBER MODAL
 # =========================================================
 
-class CheckMemberModal(SafeModal):
+class CheckMemberModal(
+    SafeModal
+):
 
     member_input = discord.ui.TextInput(
-        label="User ID or Name",
-        placeholder="User ID or name",
+        label="Who do you want to inspect?",
+        placeholder="Username, display name or ID",
         max_length=100,
+        required=True,
     )
 
     def __init__(
@@ -2331,7 +2647,7 @@ class CheckMemberModal(SafeModal):
     ):
 
         super().__init__(
-            title="Check Member"
+            title="Inspect Trader"
         )
 
         self.bot = bot
@@ -2347,7 +2663,7 @@ class CheckMemberModal(SafeModal):
 
         try:
 
-            if not interaction.guild:
+            if interaction.guild is None:
 
                 return await interaction.followup.send(
                     "This can only be used in a server.",
@@ -2364,7 +2680,7 @@ class CheckMemberModal(SafeModal):
             if member is None:
 
                 return await interaction.followup.send(
-                    "Member not found.",
+                    "Trader not found.",
                     ephemeral=True,
                 )
 
@@ -2383,11 +2699,11 @@ class CheckMemberModal(SafeModal):
         except Exception:
 
             logger.exception(
-                "CheckMember modal failed"
+                "Inspect trader modal failed"
             )
 
             await interaction.followup.send(
-                "Could not load that profile.",
+                "Could not load that trader.",
                 ephemeral=True,
             )
 
@@ -2396,7 +2712,9 @@ class CheckMemberModal(SafeModal):
 # VOUCH TARGET VIEW
 # =========================================================
 
-class VouchTargetView(SafeView):
+class VouchTargetView(
+    SafeView
+):
 
     def __init__(
         self,
@@ -2409,10 +2727,12 @@ class VouchTargetView(SafeView):
 
         self.bot = bot
 
-        self.user_select = discord.ui.UserSelect(
-            placeholder="Select a user",
-            min_values=1,
-            max_values=1,
+        self.user_select = (
+            discord.ui.UserSelect(
+                placeholder="Select the person you traded with",
+                min_values=1,
+                max_values=1,
+            )
         )
 
         self.user_select.callback = (
@@ -2424,7 +2744,7 @@ class VouchTargetView(SafeView):
         )
 
         button = discord.ui.Button(
-            label="Enter User ID / Name",
+            label="Search by ID / Name",
             style=discord.ButtonStyle.secondary,
         )
 
@@ -2443,7 +2763,9 @@ class VouchTargetView(SafeView):
 
         try:
 
-            target = self.user_select.values[0]
+            target = (
+                self.user_select.values[0]
+            )
 
             if target.bot:
 
@@ -2460,7 +2782,7 @@ class VouchTargetView(SafeView):
                 )
 
             await interaction.response.send_message(
-                "Choose your vouch type:",
+                "Choose the feedback type.",
                 view=VouchTypeView(
                     self.bot,
                     target,
@@ -2471,12 +2793,12 @@ class VouchTargetView(SafeView):
         except Exception:
 
             logger.exception(
-                "VouchTarget UserSelect failed"
+                "Vouch target select failed"
             )
 
             await safe_interaction_error(
                 interaction,
-                "Could not select that user.",
+                "Could not select that trader.",
             )
 
     async def enter_name(
@@ -2495,12 +2817,15 @@ class VouchTargetView(SafeView):
 # VOUCH MEMBER MODAL
 # =========================================================
 
-class VouchMemberModal(SafeModal):
+class VouchMemberModal(
+    SafeModal
+):
 
     member_input = discord.ui.TextInput(
-        label="User ID or Name",
-        placeholder="User ID or name",
+        label="Who are you vouching?",
+        placeholder="Username, display name or ID",
         max_length=100,
+        required=True,
     )
 
     def __init__(
@@ -2509,7 +2834,7 @@ class VouchMemberModal(SafeModal):
     ):
 
         super().__init__(
-            title="Vouch A User"
+            title="Give Trust"
         )
 
         self.bot = bot
@@ -2525,7 +2850,7 @@ class VouchMemberModal(SafeModal):
 
         try:
 
-            if not interaction.guild:
+            if interaction.guild is None:
 
                 return await interaction.followup.send(
                     "This can only be used in a server.",
@@ -2542,7 +2867,7 @@ class VouchMemberModal(SafeModal):
             if member is None:
 
                 return await interaction.followup.send(
-                    "Member not found.",
+                    "Trader not found.",
                     ephemeral=True,
                 )
 
@@ -2561,7 +2886,7 @@ class VouchMemberModal(SafeModal):
                 )
 
             await interaction.followup.send(
-                "Choose your vouch type:",
+                "Choose the feedback type.",
                 view=VouchTypeView(
                     self.bot,
                     member,
@@ -2572,20 +2897,22 @@ class VouchMemberModal(SafeModal):
         except Exception:
 
             logger.exception(
-                "VouchMemberModal failed"
+                "Give trust modal failed"
             )
 
             await interaction.followup.send(
-                "Could not load that member.",
+                "Could not load that trader.",
                 ephemeral=True,
             )
 
 
 # =========================================================
-# VOUCH TYPE VIEW
+# VOUCH TYPE
 # =========================================================
 
-class VouchTypeView(SafeView):
+class VouchTypeView(
+    SafeView
+):
 
     def __init__(
         self,
@@ -2601,7 +2928,7 @@ class VouchTypeView(SafeView):
         self.target = target
 
     @discord.ui.button(
-        label="+Vouch",
+        label="+ Vouch",
         style=discord.ButtonStyle.success,
     )
     async def positive(
@@ -2619,7 +2946,7 @@ class VouchTypeView(SafeView):
         )
 
     @discord.ui.button(
-        label="-Vouch",
+        label="- Vouch",
         style=discord.ButtonStyle.danger,
     )
     async def negative(
@@ -2641,13 +2968,16 @@ class VouchTypeView(SafeView):
 # VOUCH REASON MODAL
 # =========================================================
 
-class VouchReasonModal(SafeModal):
+class VouchReasonModal(
+    SafeModal
+):
 
     reason = discord.ui.TextInput(
-        label="Reason",
-        placeholder="Reason",
-        max_length=200,
+        label="Why?",
+        placeholder="Describe the trade briefly...",
+        max_length=300,
         required=True,
+        style=discord.TextStyle.paragraph,
     )
 
     def __init__(
@@ -2658,7 +2988,7 @@ class VouchReasonModal(SafeModal):
     ):
 
         super().__init__(
-            title="Vouch Reason"
+            title="Trade Feedback"
         )
 
         self.bot = bot
@@ -2681,10 +3011,12 @@ class VouchReasonModal(SafeModal):
 
 
 # =========================================================
-# LEADERBOARD
+# TRUST LEADERBOARD
 # =========================================================
 
-class VouchLeaderboardView(SafeView):
+class TrustLeaderboardView(
+    SafeView
+):
 
     def __init__(
         self,
@@ -2700,8 +3032,7 @@ class VouchLeaderboardView(SafeView):
         self.bot = bot
         self.guild = guild
         self.page = page
-        self.per_page = 100
-
+        self.per_page = 10
         self.has_next = False
 
         self.refresh_buttons()
@@ -2711,13 +3042,13 @@ class VouchLeaderboardView(SafeView):
         self.clear_items()
 
         previous = discord.ui.Button(
-            label="<",
+            label="◀ Previous",
             style=discord.ButtonStyle.secondary,
             disabled=self.page <= 0,
         )
 
         next_button = discord.ui.Button(
-            label=">",
+            label="Next ▶",
             style=discord.ButtonStyle.secondary,
             disabled=not self.has_next,
         )
@@ -2779,24 +3110,14 @@ class VouchLeaderboardView(SafeView):
         ]
 
         embed = discord.Embed(
-            title="Vouch Leaderboard"
+            title="Trust Rankings",
+            description=(
+                "The members with the strongest "
+                "trading trust in this server."
+            ),
         )
 
-        if not rows:
-
-            embed.description = (
-                "No members found."
-            )
-
-            self.refresh_buttons()
-
-            return embed
-
-        lines = []
-
-        position = (
-            offset + 1
-        )
+        visible_rows = []
 
         for row in rows:
 
@@ -2810,31 +3131,81 @@ class VouchLeaderboardView(SafeView):
             if member.bot:
                 continue
 
-            lines.append(
+            visible_rows.append(
                 (
-                    f"**{position}.** "
-                    f"{member.mention} "
-                    f"— **{row['trust']}/100** Trust "
-                    f"· {row['vouches_received']} received"
+                    member,
+                    int(row["trust"]),
+                    int(row["vouches_received"]),
                 )
             )
 
-            position += 1
+        if not visible_rows:
 
-        if not lines:
-
-            embed.description = (
-                "No members found."
+            embed.add_field(
+                name="No traders found",
+                value=(
+                    "There is no Trust data to display yet."
+                ),
+                inline=False,
             )
 
-        else:
+            self.refresh_buttons()
 
-            embed.description = (
-                "\n".join(lines)
+            return embed
+
+        lines = []
+
+        for index, (
+            member,
+            trust,
+            received,
+        ) in enumerate(
+            visible_rows,
+            start=offset + 1,
+        ):
+
+            if index == 1:
+                badge = "🥇"
+
+            elif index == 2:
+                badge = "🥈"
+
+            elif index == 3:
+                badge = "🥉"
+
+            else:
+                badge = f"`{index}`"
+
+            lines.append(
+                (
+                    f"{badge} **{member.display_name}**\n"
+                    f"{trust_label(trust)} · "
+                    f"**{trust}/100** · "
+                    f"{received} received"
+                )
             )
+
+        embed.add_field(
+            name=f"Top traders · Page {self.page + 1}",
+            value="\n\n".join(lines),
+            inline=False,
+        )
+
+        try:
+
+            current_member = self.guild.get_member(
+                self.bot.user.id
+                if self.bot.user
+                else 0
+            )
+
+            del current_member
+
+        except Exception:
+            pass
 
         embed.set_footer(
-            text=f"Page {self.page + 1}"
+            text="Trust Rankings • updated live"
         )
 
         self.refresh_buttons()
@@ -2853,9 +3224,7 @@ class VouchLeaderboardView(SafeView):
 
         self.page -= 1
 
-        embed = (
-            await self.build_embed()
-        )
+        embed = await self.build_embed()
 
         await interaction.edit_original_response(
             embed=embed,
@@ -2874,9 +3243,7 @@ class VouchLeaderboardView(SafeView):
 
         self.page += 1
 
-        embed = (
-            await self.build_embed()
-        )
+        embed = await self.build_embed()
 
         await interaction.edit_original_response(
             embed=embed,
@@ -2931,7 +3298,9 @@ def make_giveaway_embed(
 # GIVEAWAY VIEW
 # =========================================================
 
-class GiveawayJoinView(SafeView):
+class GiveawayJoinView(
+    SafeView
+):
 
     def __init__(
         self,
@@ -3057,7 +3426,7 @@ bot = GiveawayTrustBot()
 
 
 # =========================================================
-# GIVEAWAY GROUP
+# GIVEAWAY COMMAND GROUP
 # =========================================================
 
 giveaway_group = app_commands.Group(
@@ -3118,10 +3487,7 @@ async def activity_command(
         )
 
         embed = discord.Embed(
-            title=(
-                f"{interaction.user.display_name}"
-                "'s Activity"
-            )
+            title="Your Activity"
         )
 
         embed.add_field(
@@ -3143,7 +3509,7 @@ async def activity_command(
         )
 
         embed.add_field(
-            name="Last active",
+            name="Last Active",
             value=format_timestamp(
                 row["last_active"]
                 if row
@@ -3194,7 +3560,7 @@ async def botstats_command(
         )
 
         embed = discord.Embed(
-            title="Bot Stats"
+            title="Bot Statistics"
         )
 
         embed.add_field(
@@ -3205,7 +3571,7 @@ async def botstats_command(
         )
 
         embed.add_field(
-            name="Users cached",
+            name="Cached Users",
             value=str(
                 len(bot.users)
             ),
@@ -3289,10 +3655,14 @@ async def say_command(
             ephemeral=True,
         )
 
-    except discord.HTTPException:
+    except Exception:
+
+        logger.exception(
+            "Say command failed"
+        )
 
         await interaction.followup.send(
-            "I could not send that message.",
+            "Could not send the message.",
             ephemeral=True,
         )
 
@@ -3328,21 +3698,33 @@ async def vouchpanel_command(
     )
 
     embed = discord.Embed(
-        title="Vouch Panel",
+        title="Trader Trust Center",
         description=(
-            "Vouches show who is safe to trade sprites with. "
-            "Everyone starts at **25 Trust** out of 100.\n\n"
-            "**How it works**\n"
-            "• Traded with someone? Hit **Vouch A User**.\n"
-            "• Pick **+Vouch** or **-Vouch**.\n"
-            "• +Vouch raises Trust. -Vouch lowers it.\n"
-            "• Check anyone with **Check User's Vouch** before you trade.\n\n"
-            "**Ranks**\n"
-            f"• **<@&{ROLE_50_ID}>** · 50\n"
-            f"• **<@&{ROLE_100_ID}>** · 100\n\n"
-            "*Only vouch people you actually traded with. "
-            "Fake, spam or revenge vouches can get you permanently banned.*"
+            "A quick way to understand trading trust "
+            "before you make a deal.\n\n"
+            "**Build your profile**\n"
+            "Trade normally, then leave honest feedback "
+            "after completed trades.\n\n"
+            "**Check before you trade**\n"
+            "Inspect a member's Trust score and recent "
+            "feedback before sending anything.\n\n"
+            "**Trust milestones**\n"
+            "**50** — Trader\n"
+            "**100** — Master Trader"
         ),
+    )
+
+    embed.add_field(
+        name="Good trading",
+        value=(
+            "Only give feedback for real trades. "
+            "Keep your reason clear and specific."
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(
+        text="Trader Trust Center"
     )
 
     try:
@@ -3353,7 +3735,7 @@ async def vouchpanel_command(
         )
 
         await interaction.followup.send(
-            "Vouch panel posted.",
+            "Trader Trust Center posted.",
             ephemeral=True,
         )
 
@@ -3364,7 +3746,7 @@ async def vouchpanel_command(
         )
 
         await interaction.followup.send(
-            "Could not post the vouch panel.",
+            "Could not post the Trader Trust Center.",
             ephemeral=True,
         )
 
@@ -3398,7 +3780,7 @@ async def sync_command(
     except Exception:
 
         logger.exception(
-            "Manual sync failed"
+            "Sync failed"
         )
 
         await interaction.followup.send(
@@ -3444,7 +3826,7 @@ async def tempban_command(
     if seconds is None:
 
         return await interaction.response.send_message(
-            "Invalid duration. Use e.g. `10m`, `2h`, `1d` or `1w`.",
+            "Invalid duration. Use 10m, 2h, 1d or 1w.",
             ephemeral=True,
         )
 
@@ -3456,13 +3838,14 @@ async def tempban_command(
         )
 
     if (
-        member.top_role >= interaction.user.top_role
+        member.top_role
+        >= interaction.user.top_role
         and interaction.user.id
         != interaction.guild.owner_id
     ):
 
         return await interaction.response.send_message(
-            "You cannot ban someone with an equal/higher role.",
+            "You cannot ban someone with an equal or higher role.",
             ephemeral=True,
         )
 
@@ -3631,7 +4014,7 @@ async def giveaway_create(
     if seconds is None:
 
         return await interaction.response.send_message(
-            "Invalid duration. Use e.g. `10m`, `2h`, `1d` or `1w`.",
+            "Invalid duration. Use 10m, 2h, 1d or 1w.",
             ephemeral=True,
         )
 
@@ -3798,7 +4181,7 @@ async def giveaway_end(
 
 
 # =========================================================
-# COMMAND ERROR HANDLER
+# COMMAND ERRORS
 # =========================================================
 
 @bot.tree.error
@@ -3838,7 +4221,8 @@ async def on_app_command_error(
     else:
 
         message = (
-            "Something went wrong while processing that command."
+            "Something went wrong while processing "
+            "that command."
         )
 
     await safe_interaction_error(
@@ -3887,4 +4271,4 @@ if __name__ == "__main__":
 
     asyncio.run(
         main()
-        )
+            )
