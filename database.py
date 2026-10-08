@@ -4,6 +4,7 @@ import os
 
 import aiosqlite
 
+
 logger = logging.getLogger("bot.database")
 
 
@@ -11,6 +12,7 @@ class DatabaseController:
     def __init__(self, db_path: str = "bot_database.db"):
         self.db_path = db_path
         self.connection: aiosqlite.Connection | None = None
+
         self.operation_lock = asyncio.Lock()
         self.initialization_lock = asyncio.Lock()
 
@@ -25,15 +27,38 @@ class DatabaseController:
             connection = None
 
             try:
-                db_dir = os.path.dirname(os.path.abspath(self.db_path))
-                os.makedirs(db_dir, exist_ok=True)
+                db_dir = os.path.dirname(
+                    os.path.abspath(self.db_path)
+                )
 
-                connection = await aiosqlite.connect(self.db_path)
+                os.makedirs(
+                    db_dir,
+                    exist_ok=True,
+                )
 
-                await connection.execute("PRAGMA journal_mode=WAL;")
-                await connection.execute("PRAGMA synchronous=FULL;")
-                await connection.execute("PRAGMA foreign_keys=ON;")
-                await connection.execute("PRAGMA busy_timeout=5000;")
+                connection = await aiosqlite.connect(
+                    self.db_path
+                )
+
+                await connection.execute(
+                    "PRAGMA journal_mode=WAL;"
+                )
+
+                await connection.execute(
+                    "PRAGMA synchronous=FULL;"
+                )
+
+                await connection.execute(
+                    "PRAGMA foreign_keys=ON;"
+                )
+
+                await connection.execute(
+                    "PRAGMA busy_timeout=5000;"
+                )
+
+                # ====================================================
+                # GIVEAWAYS
+                # ====================================================
 
                 await connection.execute(
                     """
@@ -91,10 +116,18 @@ class DatabaseController:
 
                 await connection.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_giveaway_history_guild_completed
-                    ON giveaway_history(guild_id, completed_at DESC)
+                    CREATE INDEX IF NOT EXISTS
+                    idx_giveaway_history_guild_completed
+                    ON giveaway_history(
+                        guild_id,
+                        completed_at DESC
+                    )
                     """
                 )
+
+                # ====================================================
+                # USER ACTIVITY
+                # ====================================================
 
                 await connection.execute(
                     """
@@ -113,6 +146,10 @@ class DatabaseController:
                     """
                 )
 
+                # ====================================================
+                # TRUST / VOUCH SYSTEM
+                # ====================================================
+
                 await connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS user_vouch_network (
@@ -129,8 +166,13 @@ class DatabaseController:
 
                 await connection.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_vouch_network_leaderboard
-                    ON user_vouch_network(guild_id, trust_score DESC, user_id ASC)
+                    CREATE INDEX IF NOT EXISTS
+                    idx_vouch_network_leaderboard
+                    ON user_vouch_network(
+                        guild_id,
+                        trust_score DESC,
+                        user_id ASC
+                    )
                     """
                 )
 
@@ -142,37 +184,61 @@ class DatabaseController:
                         target_id INTEGER,
                         giver_id INTEGER,
                         vouch_type TEXT NOT NULL
-                            CHECK (vouch_type IN ('POSITIVE', 'NEGATIVE')),
+                            CHECK (
+                                vouch_type IN (
+                                    'POSITIVE',
+                                    'NEGATIVE'
+                                )
+                            ),
                         reason TEXT,
                         timestamp REAL
                     )
                     """
                 )
 
+                # Remove duplicate historical vouches before creating
+                # the unique constraint.
                 await connection.execute(
                     """
                     DELETE FROM vouch_history
                     WHERE id NOT IN (
                         SELECT MIN(id)
                         FROM vouch_history
-                        GROUP BY guild_id, target_id, giver_id
+                        GROUP BY
+                            guild_id,
+                            target_id,
+                            giver_id
                     )
                     """
                 )
 
                 await connection.execute(
                     """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_vouch
-                    ON vouch_history(guild_id, target_id, giver_id)
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_unique_vouch
+                    ON vouch_history(
+                        guild_id,
+                        target_id,
+                        giver_id
+                    )
                     """
                 )
 
                 await connection.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_vouch_history_target
-                    ON vouch_history(guild_id, target_id, timestamp DESC)
+                    CREATE INDEX IF NOT EXISTS
+                    idx_vouch_history_target
+                    ON vouch_history(
+                        guild_id,
+                        target_id,
+                        timestamp DESC
+                    )
                     """
                 )
+
+                # ====================================================
+                # TEMPORARY BANS
+                # ====================================================
 
                 await connection.execute(
                     """
@@ -185,18 +251,31 @@ class DatabaseController:
                     """
                 )
 
-                async def add_column(table, column, definition):
+                # ====================================================
+                # MIGRATIONS
+                # ====================================================
+
+                async def add_column(
+                    table: str,
+                    column: str,
+                    definition: str,
+                ):
                     async with connection.execute(
                         f"PRAGMA table_info({table})"
                     ) as cursor:
                         rows = await cursor.fetchall()
 
-                    existing_columns = {row[1] for row in rows}
+                    existing_columns = {
+                        row[1]
+                        for row in rows
+                    }
 
                     if column not in existing_columns:
                         await connection.execute(
-                            f"ALTER TABLE {table} "
-                            f"ADD COLUMN {column} {definition}"
+                            f"""
+                            ALTER TABLE {table}
+                            ADD COLUMN {column} {definition}
+                            """
                         )
 
                 migrations = [
@@ -306,6 +385,7 @@ class DatabaseController:
                 rowcount = cursor.rowcount
 
             await self.connection.commit()
+
             return rowcount
 
     async def fetchone(
@@ -364,6 +444,7 @@ class DatabaseController:
                     )
 
                 await self.connection.commit()
+
                 return True
 
             except Exception:
@@ -380,4 +461,6 @@ class DatabaseController:
             finally:
                 self.connection = None
 
-        logger.info("Database connection closed.")
+        logger.info(
+            "Database connection closed."
+        )
