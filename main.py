@@ -53,6 +53,7 @@ logger = logging.getLogger("bot")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
 GROQ_MODEL = os.getenv(
     "GROQ_MODEL",
     "llama-3.3-70b-versatile",
@@ -119,9 +120,7 @@ def discord_time(
     timestamp: float,
     style: str = "R",
 ) -> str:
-    return (
-        f"<t:{int(timestamp)}:{style}>"
-    )
+    return f"<t:{int(timestamp)}:{style}>"
 
 
 def clamp(
@@ -162,8 +161,7 @@ def parse_duration(
 
     rebuilt = "".join(
         f"{number}{unit}"
-        for number, unit
-        in matches
+        for number, unit in matches
     )
 
     if rebuilt != text:
@@ -178,10 +176,8 @@ def parse_duration(
     }
 
     seconds = sum(
-        int(number)
-        * multipliers[unit]
-        for number, unit
-        in matches
+        int(number) * multipliers[unit]
+        for number, unit in matches
     )
 
     if seconds <= 0:
@@ -223,8 +219,7 @@ def owner_only():
 
         return (
             BOT_OWNER_ID != 0
-            and interaction.user.id
-            == BOT_OWNER_ID
+            and interaction.user.id == BOT_OWNER_ID
         )
 
     return app_commands.check(
@@ -244,9 +239,8 @@ async def acknowledge(
     """
     Acknowledge an interaction immediately.
 
-    thinking=True is intentional. This creates a real deferred
-    channel-message response that can safely be completed with
-    interaction.followup afterwards.
+    thinking=True creates a deferred channel-message response,
+    which can safely be completed with interaction.followup.
     """
 
     try:
@@ -302,10 +296,6 @@ async def send_interaction_message(
     file: Optional[discord.File] = None,
     ephemeral: bool = True,
 ):
-    """
-    Safely send an interaction response regardless of whether
-    the initial response has already been used.
-    """
 
     try:
 
@@ -507,9 +497,7 @@ class VouchBot(discord.Client):
         logger.info(
             "Logged in as %s (%s)",
             self.user,
-            self.user.id
-            if self.user
-            else "?",
+            self.user.id if self.user else "?",
         )
 
         if not self._ready_once:
@@ -536,9 +524,7 @@ class VouchBot(discord.Client):
     # HEALTH SERVER
     # ========================================================
 
-    async def start_health_server(
-        self,
-    ):
+    async def start_health_server(self):
 
         if self.health_runner is not None:
             return
@@ -603,16 +589,13 @@ class VouchBot(discord.Client):
             {
                 "status": "ok",
                 "ready": self.is_ready(),
-                "guilds": len(
-                    self.guilds
-                ),
+                "guilds": len(self.guilds),
                 "latency_ms": round(
                     self.latency * 1000,
                     2,
                 ),
                 "database": (
-                    self.db.connection
-                    is not None
+                    self.db.connection is not None
                 ),
             }
         )
@@ -828,16 +811,10 @@ class VouchBot(discord.Client):
             if member.bot:
                 continue
 
-            if (
-                member.name.casefold()
-                == lowered
-            ):
+            if member.name.casefold() == lowered:
                 return member
 
-            if (
-                member.display_name.casefold()
-                == lowered
-            ):
+            if member.display_name.casefold() == lowered:
                 return member
 
         return None
@@ -1267,12 +1244,11 @@ class VouchBot(discord.Client):
 
         else:
 
-            score = (
-                given
-                = positive
-                = negative
-                = 0
-            )
+            # FIXED
+            score = 0
+            given = 0
+            positive = 0
+            negative = 0
 
         recent = await self.db.fetchall(
             """
@@ -1312,8 +1288,7 @@ class VouchBot(discord.Client):
             ),
             colour=(
                 discord.Colour.green()
-                if score
-                >= TRUSTED_TRADER_THRESHOLD
+                if score >= TRUSTED_TRADER_THRESHOLD
                 else discord.Colour.blue()
             ),
         )
@@ -1504,8 +1479,8 @@ class VouchBot(discord.Client):
                         )
                     )
 
-                embed.description = (
-                    "\n".join(lines)
+                embed.description = "\n".join(
+                    lines
                 )
 
             else:
@@ -1519,10 +1494,6 @@ class VouchBot(discord.Client):
                 None,
                 total_pages,
             )
-
-        # ====================================================
-        # IMAGE LEADERBOARD
-        # ====================================================
 
         width = 1200
         height = 760
@@ -1821,8 +1792,7 @@ class VouchBot(discord.Client):
                 status == "PROCESSING"
                 and current
                 - float(
-                    processing_started_at
-                    or 0
+                    processing_started_at or 0
                 )
                 > 120
             ):
@@ -1844,9 +1814,7 @@ class VouchBot(discord.Client):
                     ),
                 )
 
-            if float(
-                ends_at or 0
-            ) <= current:
+            if float(ends_at or 0) <= current:
 
                 asyncio.create_task(
                     self.finish_giveaway(
@@ -1880,7 +1848,8 @@ class VouchBot(discord.Client):
                 req_monthly,
                 req_total,
                 bypass_role_id,
-                retry_count
+                retry_count,
+                end_color
             FROM giveaway_system
             WHERE message_id = ?
             """,
@@ -1904,6 +1873,7 @@ class VouchBot(discord.Client):
             req_total,
             bypass_role_id,
             retry_count,
+            end_color,
         ) = row
 
         if status == "ENDED":
@@ -1991,17 +1961,10 @@ class VouchBot(discord.Client):
                     continue
 
                 bypass = (
-                    int(
-                        bypass_role_id
-                        or 0
-                    ) > 0
+                    int(bypass_role_id or 0) > 0
                     and any(
-                        role.id
-                        == int(
-                            bypass_role_id
-                        )
-                        for role
-                        in member.roles
+                        role.id == int(bypass_role_id)
+                        for role in member.roles
                     )
                 )
 
@@ -2044,27 +2007,16 @@ class VouchBot(discord.Client):
 
                 else:
 
-                    (
-                        daily,
-                        weekly,
-                        monthly,
-                        total,
-                    ) = (
-                        0,
-                        0,
-                        0,
-                        0,
-                    )
+                    daily = 0
+                    weekly = 0
+                    monthly = 0
+                    total = 0
 
                 if (
-                    daily
-                    >= int(req_daily or 0)
-                    and weekly
-                    >= int(req_weekly or 0)
-                    and monthly
-                    >= int(req_monthly or 0)
-                    and total
-                    >= int(req_total or 0)
+                    daily >= int(req_daily or 0)
+                    and weekly >= int(req_weekly or 0)
+                    and monthly >= int(req_monthly or 0)
+                    and total >= int(req_total or 0)
                 ):
 
                     eligible.append(
@@ -2178,7 +2130,7 @@ class VouchBot(discord.Client):
                     f"{history_winners}"
                 ),
                 colour=parse_color(
-                    None
+                    end_color
                 ),
             )
 
@@ -2227,7 +2179,7 @@ class VouchBot(discord.Client):
                         f"{discord_time(completed_at)}"
                     ),
                     colour=parse_color(
-                        None
+                        end_color
                     ),
                 )
 
@@ -3358,9 +3310,6 @@ class VouchConfirmView(
 
             return
 
-        # IMPORTANT:
-        # This is a component update, so we use the
-        # deferred message-update response here.
         await interaction.response.defer(
             thinking=False
         )
@@ -3677,8 +3626,7 @@ class VouchLeaderboardView(
         )
 
         self.next_page.disabled = (
-            self.page
-            >= self.total_pages - 1
+            self.page >= self.total_pages - 1
         )
 
     @discord.ui.button(
@@ -3694,7 +3642,6 @@ class VouchLeaderboardView(
         if interaction.guild is None:
             return
 
-        # Existing message must be updated, not replaced.
         await interaction.response.defer(
             thinking=False
         )
@@ -3863,8 +3810,7 @@ class GiveawayJoinView(
 
         if (
             status != "ACTIVE"
-            or float(ends_at or 0)
-            <= now_ts()
+            or float(ends_at or 0) <= now_ts()
         ):
 
             await interaction.followup.send(
@@ -4027,7 +3973,10 @@ async def activity(
 
     else:
 
-        total = daily = weekly = monthly = 0
+        total = 0
+        daily = 0
+        weekly = 0
+        monthly = 0
 
     embed = discord.Embed(
         title=(
@@ -4442,7 +4391,7 @@ async def giveaway_create(
             f"**Hosted by:** {host.mention}"
         ),
         colour=parse_color(
-            None
+            color_value
         ),
     )
 
@@ -4485,6 +4434,7 @@ async def giveaway_create(
         inline=False,
     )
 
+    # Create the message first.
     message = await interaction.channel.send(
         embed=embed,
         view=GiveawayJoinView(
@@ -4549,6 +4499,7 @@ async def giveaway_create(
         ),
     )
 
+    # Replace temporary button with correct message ID.
     await message.edit(
         view=GiveawayJoinView(
             bot,
@@ -4638,6 +4589,7 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(
         main()
-        )
+    )
