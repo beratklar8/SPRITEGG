@@ -499,7 +499,6 @@ class GiveawayTrustBot(discord.Client):
         trusted_role = guild.get_role(TRUSTED_TRADER_ROLE_ID)
 
         try:
-            # 50+ = Trusted Trader (exclusive of Trader)
             if trusted_role is not None:
                 if trust_score >= TRUSTED_TRADER_THRESHOLD:
                     if trusted_role not in member.roles:
@@ -507,7 +506,6 @@ class GiveawayTrustBot(discord.Client):
                 elif trusted_role in member.roles:
                     await member.remove_roles(trusted_role, reason="Vouch level fell below 50")
 
-            # 25-49 = Trader
             if trader_role is not None:
                 if TRADER_THRESHOLD <= trust_score < TRUSTED_TRADER_THRESHOLD:
                     if trader_role not in member.roles:
@@ -938,7 +936,6 @@ class GiveawayTrustBot(discord.Client):
                         reason="Temporary ban expired",
                     )
                 except discord.NotFound:
-                    # Already unbanned. The desired state is still unbanned.
                     pass
                 except discord.Forbidden:
                     logger.warning("Cannot unban %s in guild %s.", target_id, guild_id)
@@ -967,7 +964,6 @@ class GiveawayTrustBot(discord.Client):
 
     @tasks.loop(hours=1)
     async def activity_loop(self):
-        # Activity counters are rolled forward lazily whenever a message is recorded.
         return
 
     @activity_loop.before_loop
@@ -1102,8 +1098,6 @@ class GiveawayTrustBot(discord.Client):
         )
         embed.set_footer(text="Vouch Bot · Real trades only")
 
-        # IMPORTANT: send the first interaction response immediately.
-        # Do not wait for channel.send() before acknowledging the slash command.
         try:
             await interaction.response.send_message(
                 "⏳ Posting the Vouch panel...",
@@ -1266,6 +1260,9 @@ class GiveawayTrustBot(discord.Client):
             )
             return
 
+        # FIXED: Zorg ervoor dat Discord direct wordt gedefereerd zodat de 3-seconden timeout niet optreedt
+        await interaction.response.defer(ephemeral=True)
+
         ends_at = now_timestamp() + seconds
         embed = discord.Embed(
             title="Giveaway",
@@ -1279,7 +1276,6 @@ class GiveawayTrustBot(discord.Client):
         )
         embed.set_footer(text=f"Hosted by {interaction.user}")
 
-        await interaction.response.defer(ephemeral=True)
         message = await interaction.channel.send(embed=embed)
 
         await self.db.execute(
@@ -1413,8 +1409,6 @@ class GiveawayTrustBot(discord.Client):
         logger.exception("Message command error", exc_info=error)
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        # Always print the real exception and traceback. Passing an exception
-        # object directly to logger.exception(exc_info=...) is unreliable here.
         logger.error(
             "Slash command error in /%s (%s)",
             getattr(getattr(interaction, "command", None), "qualified_name", "unknown"),
@@ -1728,6 +1722,8 @@ class TrustPanelView(discord.ui.View):
             )
             return
 
+        # FIXED: De leaderboard maakt een afbeelding via Pillow (wat langer kan duren). 
+        # Door direct te deferren voorkomen we een "Application did not respond" timeout.
         await interaction.response.defer(ephemeral=True)
         view = VouchLeaderboardView(
             self.bot,
@@ -1954,7 +1950,7 @@ class VouchReasonModal(discord.ui.Modal):
                 target = None
 
         if target is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ That user is no longer in this server.",
                 ephemeral=True,
             )
@@ -2122,7 +2118,7 @@ class CheckMemberView(discord.ui.View):
 
     async def user_select_callback(self, interaction: discord.Interaction):
         if interaction.guild is None:
-            await interaction.response.send_message(
+            await interaction.response.send_message(z
                 "❌ This action only works inside a server.",
                 ephemeral=True,
             )
@@ -2406,7 +2402,6 @@ class GiveawayJoinView(discord.ui.View):
 
 bot = GiveawayTrustBot()
 
-# Register non-group slash commands.
 bot.tree.add_command(bot.activity_command)
 bot.tree.add_command(bot.botstats_command)
 bot.tree.add_command(bot.say_command)
