@@ -42,6 +42,8 @@ PORT = int(os.getenv("PORT", "10000"))
 if os.getenv("DATABASE_PATH"):
     DATABASE_PATH = os.getenv("DATABASE_PATH")
 else:
+    # Render's /data directory only exists when a persistent disk is mounted.
+    # The project directory is writable on a normal Render service.
     DATABASE_PATH = os.path.join(os.getcwd(), "bot_database.db")
 
 TRADER_ROLE_ID = 1529114068412141639
@@ -77,6 +79,7 @@ def clamp(value: int, minimum: int = 0, maximum: int = 100) -> int:
 
 
 def parse_duration(value: str) -> Optional[int]:
+    """Accept 30, 30s, 10m, 2h, 1d and return seconds."""
     value = value.strip().lower()
     if not value:
         return None
@@ -89,7 +92,7 @@ def parse_duration(value: str) -> Optional[int]:
     unit = match.group(2)
 
     multiplier = {
-        "": 60,
+        "": 60,   # bare numbers are minutes
         "s": 1,
         "m": 60,
         "h": 3600,
@@ -138,12 +141,16 @@ class GiveawayTrustBot(discord.Client):
     async def setup_hook(self):
         await self.db.initialize_database()
 
+        # Old versions created new profiles at 25. Reset only untouched legacy
+        # default profiles; users who already earned a different score keep it.
         await self.db.execute(
             "UPDATE user_vouch_network SET trust_score = 0 WHERE trust_score = 25 AND vouches_given = 0 AND vouch_positive = 0 AND vouch_negative = 0"
         )
 
+        # Persistent Trust panel.
         self.add_view(TrustPanelView(self))
 
+        # Recover giveaways after restarts.
         await self.db.execute(
             """
             UPDATE giveaway_system
@@ -195,6 +202,7 @@ class GiveawayTrustBot(discord.Client):
             self.ready_once = True
             logger.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "?")
 
+            # Give existing non-bot guild members the default 0 Trust profile.
             for guild in self.guilds:
                 await self.ensure_guild_trust_users(guild)
 
@@ -421,6 +429,7 @@ class GiveawayTrustBot(discord.Client):
         image = Image.new("RGB", (width, height), (15, 17, 24))
         draw = ImageDraw.Draw(image)
 
+        # Header
         draw.rounded_rectangle((40, 35, width - 40, 155), radius=28, fill=(28, 32, 45), outline=(70, 78, 100), width=2)
         draw.text((75, 58), "VOUCH LEADERBOARD", font=self._font(42, True), fill=(245, 247, 250))
         draw.text((78, 112), f"{guild.name}  •  Page {page + 1}/{total_pages}", font=self._font(22), fill=(160, 168, 185))
@@ -490,6 +499,7 @@ class GiveawayTrustBot(discord.Client):
         trusted_role = guild.get_role(TRUSTED_TRADER_ROLE_ID)
 
         try:
+            # 50+ = Trusted Trader (exclusive of Trader)
             if trusted_role is not None:
                 if trust_score >= TRUSTED_TRADER_THRESHOLD:
                     if trusted_role not in member.roles:
@@ -497,6 +507,7 @@ class GiveawayTrustBot(discord.Client):
                 elif trusted_role in member.roles:
                     await member.remove_roles(trusted_role, reason="Vouch level fell below 50")
 
+            # 25-49 = Trader
             if trader_role is not None:
                 if TRADER_THRESHOLD <= trust_score < TRUSTED_TRADER_THRESHOLD:
                     if trader_role not in member.roles:
@@ -927,6 +938,7 @@ class GiveawayTrustBot(discord.Client):
                         reason="Temporary ban expired",
                     )
                 except discord.NotFound:
+                    # Already unbanned. The desired state is still unbanned.
                     pass
                 except discord.Forbidden:
                     logger.warning("Cannot unban %s in guild %s.", target_id, guild_id)
@@ -955,6 +967,7 @@ class GiveawayTrustBot(discord.Client):
 
     @tasks.loop(hours=1)
     async def activity_loop(self):
+        # Activity counters are rolled forward lazily whenever a message is recorded.
         return
 
     @activity_loop.before_loop
@@ -1089,6 +1102,8 @@ class GiveawayTrustBot(discord.Client):
         )
         embed.set_footer(text="Vouch Bot · Real trades only")
 
+        # IMPORTANT: send the first interaction response immediately.
+        # Do not wait for channel.send() before acknowledging the slash command.
         try:
             await interaction.response.send_message(
                 "⏳ Posting the Vouch panel...",
@@ -1251,8 +1266,6 @@ class GiveawayTrustBot(discord.Client):
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
-
         ends_at = now_timestamp() + seconds
         embed = discord.Embed(
             title="Giveaway",
@@ -1266,6 +1279,7 @@ class GiveawayTrustBot(discord.Client):
         )
         embed.set_footer(text=f"Hosted by {interaction.user}")
 
+        await interaction.response.defer(ephemeral=True)
         message = await interaction.channel.send(embed=embed)
 
         await self.db.execute(
@@ -1399,6 +1413,8 @@ class GiveawayTrustBot(discord.Client):
         logger.exception("Message command error", exc_info=error)
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        # Always print the real exception and traceback. Passing an exception
+        # object directly to logger.exception(exc_info=...) is unreliable here.
         logger.error(
             "Slash command error in /%s (%s)",
             getattr(getattr(interaction, "command", None), "qualified_name", "unknown"),
@@ -1781,10 +1797,10 @@ class VouchTargetView(discord.ui.View):
             color=discord.Color.blurple(),
         )
         embed.set_thumbnail(url=target.display_avatar.url)
-        await interaction.response.send_message(
+        # OPGELOST: Gebruik .edit_original_message of .response.edit_message / followup in plaats van een nieuwe .response.send_message om "Interaction failed" te voorkomen
+        await interaction.response.edit_message(
             embed=embed,
             view=VouchTypeView(self.bot, target.id),
-            ephemeral=True,
         )
 
     @discord.ui.button(
@@ -2106,7 +2122,6 @@ class CheckMemberView(discord.ui.View):
 
     async def user_select_callback(self, interaction: discord.Interaction):
         if interaction.guild is None:
-            # Gecorrigeerd: de losse 'z' is hier verwijderd
             await interaction.response.send_message(
                 "❌ This action only works inside a server.",
                 ephemeral=True,
@@ -2350,7 +2365,7 @@ class GiveawayJoinView(discord.ui.View):
             """
             SELECT status, ends_at
             FROM giveaway_system
-            WHERE message_id = ?
+            WHERE message_id = /?
             """,
             (self.message_id,),
         )
@@ -2391,6 +2406,7 @@ class GiveawayJoinView(discord.ui.View):
 
 bot = GiveawayTrustBot()
 
+# Register non-group slash commands.
 bot.tree.add_command(bot.activity_command)
 bot.tree.add_command(bot.botstats_command)
 bot.tree.add_command(bot.say_command)
