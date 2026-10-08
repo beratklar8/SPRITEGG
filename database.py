@@ -459,7 +459,6 @@ class DatabaseController:
                     """
                 )
 
-                # Verwijder oude dubbele vouches.
                 await connection.execute(
                     """
                     DELETE FROM vouch_history
@@ -701,4 +700,4 @@ class DatabaseController:
 
         logger.info(
             "Database connection closed."
-        )
+                )
