@@ -16,6 +16,35 @@ class DatabaseController:
         self.operation_lock = asyncio.Lock()
         self.initialization_lock = asyncio.Lock()
 
+    async def _ensure_column(
+        self,
+        connection: aiosqlite.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ):
+        async with connection.execute(
+            f"PRAGMA table_info({table})"
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        existing_columns = {
+            row[1]
+            for row in rows
+        }
+
+        if column not in existing_columns:
+            await connection.execute(
+                f"ALTER TABLE {table} "
+                f"ADD COLUMN {column} {definition}"
+            )
+
+            logger.info(
+                "Added missing column %s.%s",
+                table,
+                column,
+            )
+
     async def initialize_database(self):
         if self.connection is not None:
             return
@@ -87,6 +116,94 @@ class DatabaseController:
                     """
                 )
 
+                # Safe migration for older databases.
+                giveaway_columns = [
+                    (
+                        "channel_id",
+                        "INTEGER",
+                    ),
+                    (
+                        "guild_id",
+                        "INTEGER",
+                    ),
+                    (
+                        "prize",
+                        "TEXT",
+                    ),
+                    (
+                        "ends_at",
+                        "REAL",
+                    ),
+                    (
+                        "winners",
+                        "INTEGER",
+                    ),
+                    (
+                        "host_id",
+                        "INTEGER",
+                    ),
+                    (
+                        "status",
+                        "TEXT DEFAULT 'ACTIVE'",
+                    ),
+                    (
+                        "processing_started_at",
+                        "REAL DEFAULT 0",
+                    ),
+                    (
+                        "result_message_id",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "req_daily",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "req_weekly",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "req_monthly",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "req_total",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "bypass_role_id",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "end_color",
+                        "TEXT",
+                    ),
+                    (
+                        "retry_count",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "last_error",
+                        "TEXT",
+                    ),
+                    (
+                        "result_winners",
+                        "TEXT",
+                    ),
+                    (
+                        "result_participant_count",
+                        "INTEGER DEFAULT 0",
+                    ),
+                ]
+
+                for column, definition in giveaway_columns:
+                    await self._ensure_column(
+                        connection,
+                        "giveaway_system",
+                        column,
+                        definition,
+                    )
+
                 await connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS giveaway_participants (
@@ -146,8 +263,57 @@ class DatabaseController:
                     """
                 )
 
+                await self._ensure_column(
+                    connection,
+                    "user_activity",
+                    "message_count",
+                    "INTEGER DEFAULT 0",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_activity",
+                    "daily_message_count",
+                    "INTEGER DEFAULT 0",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_activity",
+                    "week_message_count",
+                    "INTEGER DEFAULT 0",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_activity",
+                    "month_message_count",
+                    "INTEGER DEFAULT 0",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_activity",
+                    "last_daily_date",
+                    "TEXT",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_activity",
+                    "last_weekly_date",
+                    "TEXT",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_activity",
+                    "last_monthly_date",
+                    "TEXT",
+                )
+
                 # ====================================================
-                # TRUST / VOUCH SYSTEM
+                # TRUST / VOUCH
                 # ====================================================
 
                 await connection.execute(
@@ -162,6 +328,34 @@ class DatabaseController:
                         PRIMARY KEY (guild_id, user_id)
                     )
                     """
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_vouch_network",
+                    "trust_score",
+                    "INTEGER DEFAULT 25",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_vouch_network",
+                    "vouches_given",
+                    "INTEGER DEFAULT 0",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_vouch_network",
+                    "vouch_positive",
+                    "INTEGER DEFAULT 0",
+                )
+
+                await self._ensure_column(
+                    connection,
+                    "user_vouch_network",
+                    "vouch_negative",
+                    "INTEGER DEFAULT 0",
                 )
 
                 await connection.execute(
@@ -196,8 +390,8 @@ class DatabaseController:
                     """
                 )
 
-                # Remove duplicate historical vouches before
-                # creating the unique index.
+                # Remove duplicate vouches from old databases
+                # before creating the unique index.
                 await connection.execute(
                     """
                     DELETE FROM vouch_history
@@ -254,12 +448,7 @@ class DatabaseController:
                 )
 
                 if connection is not None:
-                    try:
-                        await connection.close()
-                    except Exception:
-                        logger.exception(
-                            "Failed to close database after initialization error."
-                        )
+                    await connection.close()
 
                 raise
 
@@ -334,4 +523,4 @@ class DatabaseController:
 
         logger.info(
             "Database connection closed."
-                )
+        )
