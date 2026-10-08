@@ -1,1137 +1,419 @@
 import asyncio
-import json
 import logging
-import time
-from contextlib import asynccontextmanager
+import os
 
 import aiosqlite
 
-log = logging.getLogger(__name__)
 
-ACTIVE = "ACTIVE"
-PROCESSING = "PROCESSING"
-PROCESSING_RESULT = "PROCESSING_RESULT"
-COMPLETED = "COMPLETED"
-FAILED = "FAILED"
-
-DB_VERSION = 4
+logger = logging.getLogger("bot.database")
 
 
-def now() -> float:
-    return time.time()
+class DatabaseController:
+    def __init__(self, db_path: str = "bot_database.db"):
+        self.db_path = db_path
+        self.connection: aiosqlite.Connection | None = None
+        self.operation_lock = asyncio.Lock()
+        self.initialization_lock = asyncio.Lock()
 
-
-class Database:
-    def __init__(self, path: str = "giveaways.db"):
-        self.path = path
-        self.conn: aiosqlite.Connection | None = None
-        self.lock = asyncio.Lock()
-
-    async def connect(self):
-        if self.conn is not None:
+    async def initialize_database(self):
+        if self.connection is not None:
             return
 
-        self.conn = await aiosqlite.connect(self.path)
-        self.conn.row_factory = aiosqlite.Row
+        async with self.initialization_lock:
+            if self.connection is not None:
+                return
 
-        await self.conn.execute("PRAGMA journal_mode=WAL")
-        await self.conn.execute("PRAGMA synchronous=FULL")
-        await self.conn.execute("PRAGMA foreign_keys=ON")
-        await self.conn.execute("PRAGMA busy_timeout=10000")
-        await self.conn.commit()
-
-        await self.migrate()
-
-    async def close(self):
-        async with self.lock:
-            if self.conn is not None:
-                await self.conn.close()
-                self.conn = None
-
-    def _db(self):
-        if self.conn is None:
-            raise RuntimeError("Database is not connected")
-
-        return self.conn
-
-    @asynccontextmanager
-    async def transaction(self):
-        db = self._db()
-
-        async with self.lock:
-            await db.execute("BEGIN IMMEDIATE")
+            connection = None
 
             try:
-                yield db
-            except BaseException:
-                await db.rollback()
-                raise
-            else:
-                await db.commit()
+                db_dir = os.path.dirname(os.path.abspath(self.db_path))
+                os.makedirs(db_dir, exist_ok=True)
 
-    # ============================================================
-    # MIGRATIONS
-    # ============================================================
+                connection = await aiosqlite.connect(self.db_path)
 
-    async def migrate(self):
-        db = self._db()
+                await connection.execute("PRAGMA journal_mode=WAL;")
+                await connection.execute("PRAGMA synchronous=FULL;")
+                await connection.execute("PRAGMA foreign_keys=ON;")
+                await connection.execute("PRAGMA busy_timeout=5000;")
 
-        async with self.lock:
-            async with db.execute(
-                "PRAGMA user_version"
-            ) as cursor:
-                row = await cursor.fetchone()
+                # ============================================================
+                # GIVEAWAY SYSTEM
+                # ============================================================
 
-            version = int(row[0])
-
-            if version < 1:
-                await db.executescript(
+                await connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS giveaway_system (
                         message_id INTEGER PRIMARY KEY,
-                        guild_id INTEGER NOT NULL,
-                        channel_id INTEGER NOT NULL,
-
-                        prize TEXT NOT NULL,
-
-                        status TEXT NOT NULL,
-
-                        winner_count INTEGER NOT NULL,
-                        max_participants INTEGER NOT NULL,
-                        participant_count INTEGER NOT NULL DEFAULT 0,
-
-                        expires_at REAL NOT NULL,
-
-                        processing_token TEXT,
-                        processing_started_at REAL,
-
-                        result_send_owner_token TEXT,
-                        result_send_started_at REAL,
-
-                        result_message_id INTEGER,
+                        channel_id INTEGER,
+                        guild_id INTEGER,
+                        prize TEXT,
+                        ends_at REAL,
+                        winners INTEGER,
+                        host_id INTEGER,
+                        status TEXT DEFAULT 'ACTIVE',
+                        processing_started_at REAL DEFAULT 0,
+                        result_message_id INTEGER DEFAULT 0,
+                        req_daily INTEGER DEFAULT 0,
+                        req_weekly INTEGER DEFAULT 0,
+                        req_monthly INTEGER DEFAULT 0,
+                        req_total INTEGER DEFAULT 0,
+                        bypass_role_id INTEGER DEFAULT 0,
+                        end_color TEXT,
+                        retry_count INTEGER DEFAULT 0,
+                        last_error TEXT,
                         result_winners TEXT,
-                        final_participant_count INTEGER,
+                        result_participant_count INTEGER DEFAULT 0
+                    )
+                    """
+                )
 
-                        retry_count INTEGER NOT NULL DEFAULT 0,
-                        next_retry_at REAL,
-
-                        error_code TEXT,
-                        error_message TEXT,
-
-                        creation_token TEXT UNIQUE,
-
-                        created_at REAL NOT NULL
-                    );
-
+                await connection.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS giveaway_participants (
-                        message_id INTEGER NOT NULL,
-                        user_id INTEGER NOT NULL,
-                        joined_at REAL NOT NULL,
-
-                        PRIMARY KEY(message_id, user_id),
-
-                        FOREIGN KEY(message_id)
+                        message_id INTEGER,
+                        user_id INTEGER,
+                        PRIMARY KEY (message_id, user_id),
+                        FOREIGN KEY (message_id)
                             REFERENCES giveaway_system(message_id)
                             ON DELETE CASCADE
-                    );
-
-                    CREATE TABLE IF NOT EXISTS giveaway_creation_intents (
-                        creation_token TEXT PRIMARY KEY,
-
-                        state TEXT NOT NULL,
-
-                        guild_id INTEGER NOT NULL,
-                        channel_id INTEGER NOT NULL,
-                        message_id INTEGER,
-
-                        payload TEXT NOT NULL,
-
-                        created_at REAL NOT NULL,
-                        updated_at REAL NOT NULL,
-
-                        error_message TEXT
-                    );
-
-                    PRAGMA user_version = 1;
-                    """
-                )
-
-                version = 1
-
-            if version < 2:
-                await db.executescript(
-                    """
-                    CREATE INDEX IF NOT EXISTS
-                    idx_giveaway_status_expiry
-                    ON giveaway_system(status, expires_at);
-
-                    CREATE INDEX IF NOT EXISTS
-                    idx_giveaway_retry
-                    ON giveaway_system(status, next_retry_at);
-
-                    CREATE INDEX IF NOT EXISTS
-                    idx_giveaway_processing_lease
-                    ON giveaway_system(
-                        status,
-                        processing_started_at
-                    );
-
-                    CREATE INDEX IF NOT EXISTS
-                    idx_giveaway_result_lease
-                    ON giveaway_system(
-                        status,
-                        result_send_started_at
-                    );
-
-                    CREATE INDEX IF NOT EXISTS
-                    idx_participants_message
-                    ON giveaway_participants(message_id);
-
-                    CREATE INDEX IF NOT EXISTS
-                    idx_creation_intents_state
-                    ON giveaway_creation_intents(
-                        state,
-                        updated_at
-                    );
-
-                    PRAGMA user_version = 2;
-                    """
-                )
-
-                version = 2
-
-            if version < 3:
-                async with db.execute(
-                    "PRAGMA table_info(giveaway_system)"
-                ) as cursor:
-                    columns = await cursor.fetchall()
-
-                names = {
-                    row["name"]
-                    for row in columns
-                }
-
-                if "error_message" not in names:
-                    await db.execute(
-                        """
-                        ALTER TABLE giveaway_system
-                        ADD COLUMN error_message TEXT
-                        """
                     )
-
-                await db.execute(
-                    "PRAGMA user_version = 3"
+                    """
                 )
 
-                version = 3
-
-            if version < 4:
-                async with db.execute(
-                    "PRAGMA table_info(giveaway_system)"
-                ) as cursor:
-                    columns = await cursor.fetchall()
-
-                names = {
-                    row["name"]
-                    for row in columns
-                }
-
-                if "prize" not in names:
-                    await db.execute(
-                        """
-                        ALTER TABLE giveaway_system
-                        ADD COLUMN prize TEXT NOT NULL DEFAULT ''
-                        """
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS giveaway_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        message_id INTEGER UNIQUE,
+                        guild_id INTEGER,
+                        prize TEXT,
+                        participant_count INTEGER,
+                        winners TEXT,
+                        completed_at REAL
                     )
-
-                await db.execute(
-                    "PRAGMA user_version = 4"
+                    """
                 )
 
-                version = 4
-
-            await db.commit()
-
-    async def integrity_check(self):
-        db = self._db()
-
-        async with db.execute(
-            "PRAGMA integrity_check"
-        ) as cursor:
-            result = await cursor.fetchone()
-
-        if result[0] != "ok":
-            raise RuntimeError(
-                f"SQLite integrity check failed: {result[0]}"
-            )
-
-        async with db.execute(
-            "PRAGMA foreign_key_check"
-        ) as cursor:
-            foreign = await cursor.fetchall()
-
-        if foreign:
-            raise RuntimeError(
-                "SQLite foreign key check failed"
-            )
-
-    # ============================================================
-    # CREATION INTENTS
-    # ============================================================
-
-    async def create_intent(
-        self,
-        creation_token: str,
-        guild_id: int,
-        channel_id: int,
-        payload: dict,
-    ):
-        async with self.transaction() as db:
-            current_time = now()
-
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO
-                giveaway_creation_intents
-                (
-                    creation_token,
-                    state,
-                    guild_id,
-                    channel_id,
-                    payload,
-                    created_at,
-                    updated_at
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_giveaway_history_guild_completed
+                    ON giveaway_history(guild_id, completed_at DESC)
+                    """
                 )
-                VALUES (
-                    ?,
-                    'PENDING',
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    ?
+
+                # ============================================================
+                # USER ACTIVITY
+                # ============================================================
+
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_activity (
+                        guild_id INTEGER,
+                        user_id INTEGER,
+                        message_count INTEGER DEFAULT 0,
+                        daily_message_count INTEGER DEFAULT 0,
+                        week_message_count INTEGER DEFAULT 0,
+                        month_message_count INTEGER DEFAULT 0,
+                        last_daily_date TEXT,
+                        last_weekly_date TEXT,
+                        last_monthly_date TEXT,
+                        PRIMARY KEY (guild_id, user_id)
+                    )
+                    """
                 )
-                """,
-                (
-                    creation_token,
-                    guild_id,
-                    channel_id,
-                    json.dumps(
-                        payload,
-                        separators=(",", ":"),
+
+                # ============================================================
+                # VOUCH SYSTEM
+                # ============================================================
+
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_vouch_network (
+                        guild_id INTEGER,
+                        user_id INTEGER,
+                        trust_score INTEGER DEFAULT 50,
+                        vouches_given INTEGER DEFAULT 0,
+                        vouch_positive INTEGER DEFAULT 0,
+                        vouch_negative INTEGER DEFAULT 0,
+                        PRIMARY KEY (guild_id, user_id)
+                    )
+                    """
+                )
+
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_vouch_network_leaderboard
+                    ON user_vouch_network(
+                        guild_id,
+                        trust_score DESC,
+                        user_id ASC
+                    )
+                    """
+                )
+
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS vouch_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        guild_id INTEGER,
+                        target_id INTEGER,
+                        giver_id INTEGER,
+                        vouch_type TEXT NOT NULL
+                            CHECK (vouch_type IN ('POSITIVE', 'NEGATIVE')),
+                        reason TEXT,
+                        timestamp REAL
+                    )
+                    """
+                )
+
+                # Remove duplicate vouches before creating unique index.
+                await connection.execute(
+                    """
+                    DELETE FROM vouch_history
+                    WHERE id NOT IN (
+                        SELECT MIN(id)
+                        FROM vouch_history
+                        GROUP BY guild_id, target_id, giver_id
+                    )
+                    """
+                )
+
+                await connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_unique_vouch
+                    ON vouch_history(guild_id, target_id, giver_id)
+                    """
+                )
+
+                await connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS
+                    idx_vouch_history_target
+                    ON vouch_history(
+                        guild_id,
+                        target_id,
+                        timestamp DESC
+                    )
+                    """
+                )
+
+                # ============================================================
+                # TEMPORARY BANS
+                # ============================================================
+
+                await connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS temporary_bans (
+                        guild_id INTEGER,
+                        target_id INTEGER,
+                        expiry_timestamp REAL,
+                        PRIMARY KEY (guild_id, target_id)
+                    )
+                    """
+                )
+
+                # ============================================================
+                # MIGRATIONS
+                # ============================================================
+
+                async def add_column(
+                    table: str,
+                    column: str,
+                    definition: str,
+                ):
+                    async with connection.execute(
+                        f"PRAGMA table_info({table})"
+                    ) as cursor:
+                        rows = await cursor.fetchall()
+
+                    existing_columns = {
+                        row[1]
+                        for row in rows
+                    }
+
+                    if column not in existing_columns:
+                        await connection.execute(
+                            f"ALTER TABLE {table} "
+                            f"ADD COLUMN {column} {definition}"
+                        )
+
+                migrations = [
+                    ("giveaway_system", "host_id", "INTEGER DEFAULT 0"),
+                    (
+                        "giveaway_system",
+                        "result_message_id",
+                        "INTEGER DEFAULT 0",
                     ),
-                    current_time,
-                    current_time,
-                ),
-            )
-
-    async def set_intent_message(
-        self,
-        creation_token: str,
-        message_id: int,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_creation_intents
-
-                SET
-                    state='MESSAGE_CREATED',
-                    message_id=?,
-                    updated_at=?
-
-                WHERE
-                    creation_token=?
-                    AND state='PENDING'
-                """,
-                (
-                    message_id,
-                    now(),
-                    creation_token,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    async def set_intent_db_created(
-        self,
-        creation_token: str,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_creation_intents
-
-                SET
-                    state='DB_CREATED',
-                    updated_at=?
-
-                WHERE
-                    creation_token=?
-                    AND state='MESSAGE_CREATED'
-                """,
-                (
-                    now(),
-                    creation_token,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    async def set_intent_activation_pending(
-        self,
-        creation_token: str,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_creation_intents
-
-                SET
-                    state='ACTIVATION_PENDING',
-                    updated_at=?
-
-                WHERE
-                    creation_token=?
-                    AND state IN (
-                        'MESSAGE_CREATED',
-                        'DB_CREATED'
-                    )
-                """,
-                (
-                    now(),
-                    creation_token,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    async def complete_intent(
-        self,
-        creation_token: str,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_creation_intents
-
-                SET
-                    state='COMPLETED',
-                    updated_at=?
-
-                WHERE
-                    creation_token=?
-                    AND state IN (
-                        'DB_CREATED',
-                        'ACTIVATION_PENDING'
-                    )
-                """,
-                (
-                    now(),
-                    creation_token,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    async def fail_intent(
-        self,
-        creation_token: str,
-        error: str,
-    ):
-        async with self.transaction() as db:
-            await db.execute(
-                """
-                UPDATE giveaway_creation_intents
-
-                SET
-                    state='FAILED',
-                    updated_at=?,
-                    error_message=?
-
-                WHERE creation_token=?
-                """,
-                (
-                    now(),
-                    str(error)[:1000],
-                    creation_token,
-                ),
-            )
-
-    async def get_recovery_intents(self):
-        db = self._db()
-
-        async with db.execute(
-            """
-            SELECT *
-            FROM giveaway_creation_intents
-            WHERE state IN (
-                'PENDING',
-                'MESSAGE_CREATED',
-                'DB_CREATED',
-                'ACTIVATION_PENDING'
-            )
-            ORDER BY created_at
-            """
-        ) as cursor:
-            return await cursor.fetchall()
-
-    # ============================================================
-    # GIVEAWAYS
-    # ============================================================
-
-    async def create_giveaway(
-        self,
-        *,
-        message_id: int,
-        guild_id: int,
-        channel_id: int,
-        prize: str,
-        winner_count: int,
-        max_participants: int,
-        expires_at: float,
-        creation_token: str,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                INSERT OR IGNORE INTO giveaway_system
-                (
-                    message_id,
-                    guild_id,
-                    channel_id,
-                    prize,
-                    status,
-                    winner_count,
-                    max_participants,
-                    participant_count,
-                    expires_at,
-                    creation_token,
-                    created_at
-                )
-                VALUES (
-                    ?,
-                    ?,
-                    ?,
-                    ?,
-                    'ACTIVE',
-                    ?,
-                    ?,
-                    0,
-                    ?,
-                    ?,
-                    ?
-                )
-                """,
-                (
-                    message_id,
-                    guild_id,
-                    channel_id,
-                    prize,
-                    winner_count,
-                    max_participants,
-                    expires_at,
-                    creation_token,
-                    now(),
-                ),
-            )
-
-            if cur.rowcount != 1:
-                return False
-
-            await db.execute(
-                """
-                UPDATE giveaway_creation_intents
-
-                SET
-                    state='DB_CREATED',
-                    updated_at=?
-
-                WHERE
-                    creation_token=?
-                    AND state='MESSAGE_CREATED'
-                """,
-                (
-                    now(),
-                    creation_token,
-                ),
-            )
-
-            return True
-
-    async def get_giveaway(
-        self,
-        message_id: int,
-    ):
-        db = self._db()
-
-        async with db.execute(
-            """
-            SELECT *
-            FROM giveaway_system
-            WHERE message_id=?
-            """,
-            (message_id,),
-        ) as cursor:
-            return await cursor.fetchone()
-
-    async def get_expired_giveaways(
-        self,
-        limit: int = 25,
-    ):
-        db = self._db()
-
-        async with db.execute(
-            """
-            SELECT message_id
-
-            FROM giveaway_system
-
-            WHERE
-                status='ACTIVE'
-                AND expires_at <= ?
-
-            ORDER BY expires_at ASC
-
-            LIMIT ?
-            """,
-            (
-                now(),
-                limit,
-            ),
-        ) as cursor:
-            return await cursor.fetchall()
-
-    async def get_result_retries(
-        self,
-        limit: int = 25,
-    ):
-        db = self._db()
-
-        async with db.execute(
-            """
-            SELECT message_id
-
-            FROM giveaway_system
-
-            WHERE
-                status='PROCESSING_RESULT'
-                AND (
-                    next_retry_at IS NULL
-                    OR next_retry_at <= ?
-                )
-
-            ORDER BY
-                COALESCE(next_retry_at, 0) ASC
-
-            LIMIT ?
-            """,
-            (
-                now(),
-                limit,
-            ),
-        ) as cursor:
-            return await cursor.fetchall()
-
-    # ============================================================
-    # PROCESSING
-    # ============================================================
-
-    async def claim_processing(
-        self,
-        message_id: int,
-        processing_token: str,
-    ) -> bool:
-        async with self.transaction() as db:
-            current_time = now()
-
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET
-                    status='PROCESSING',
-                    processing_token=?,
-                    processing_started_at=?,
-                    error_code=NULL,
-                    error_message=NULL
-
-                WHERE
-                    message_id=?
-                    AND status='ACTIVE'
-                    AND expires_at <= ?
-                """,
-                (
-                    processing_token,
-                    current_time,
-                    message_id,
-                    current_time,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    async def save_processing_result(
-        self,
-        message_id: int,
-        processing_token: str,
-        winners: list[int],
-        participant_count: int,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET
-                    status='PROCESSING_RESULT',
-                    result_winners=?,
-                    final_participant_count=?,
-                    participant_count=?,
-                    processing_token=NULL,
-                    processing_started_at=NULL,
-                    retry_count=0,
-                    next_retry_at=NULL
-
-                WHERE
-                    message_id=?
-                    AND status='PROCESSING'
-                    AND processing_token=?
-                """,
-                (
-                    json.dumps(
-                        winners,
-                        separators=(",", ":"),
+                    (
+                        "giveaway_system",
+                        "req_daily",
+                        "INTEGER DEFAULT 0",
                     ),
-                    participant_count,
-                    participant_count,
-                    message_id,
-                    processing_token,
-                ),
-            )
+                    (
+                        "giveaway_system",
+                        "req_weekly",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "giveaway_system",
+                        "req_monthly",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "giveaway_system",
+                        "req_total",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "giveaway_system",
+                        "bypass_role_id",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "giveaway_system",
+                        "end_color",
+                        "TEXT",
+                    ),
+                    (
+                        "giveaway_system",
+                        "retry_count",
+                        "INTEGER DEFAULT 0",
+                    ),
+                    (
+                        "giveaway_system",
+                        "last_error",
+                        "TEXT",
+                    ),
+                    (
+                        "giveaway_system",
+                        "result_winners",
+                        "TEXT",
+                    ),
+                    (
+                        "giveaway_system",
+                        "result_participant_count",
+                        "INTEGER DEFAULT 0",
+                    ),
+                ]
 
-            return cur.rowcount == 1
-
-    async def fail_processing(
-        self,
-        message_id: int,
-        processing_token: str,
-        error_code: str,
-        error_message: str,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET
-                    status='FAILED',
-                    processing_token=NULL,
-                    processing_started_at=NULL,
-                    error_code=?,
-                    error_message=?,
-                    next_retry_at=NULL
-
-                WHERE
-                    message_id=?
-                    AND status='PROCESSING'
-                    AND processing_token=?
-                """,
-                (
-                    error_code[:100],
-                    str(error_message)[:1000],
-                    message_id,
-                    processing_token,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    # ============================================================
-    # RESULT LEASE
-    # ============================================================
-
-    async def claim_result(
-        self,
-        message_id: int,
-        owner_token: str,
-        lease_seconds: int = 120,
-    ) -> bool:
-        cutoff = now() - lease_seconds
-
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET
-                    result_send_owner_token=?,
-                    result_send_started_at=?
-
-                WHERE
-                    message_id=?
-                    AND status='PROCESSING_RESULT'
-                    AND (
-                        result_send_owner_token IS NULL
-                        OR result_send_started_at < ?
+                for table, column, definition in migrations:
+                    await add_column(
+                        table,
+                        column,
+                        definition,
                     )
-                """,
-                (
-                    owner_token,
-                    now(),
-                    message_id,
-                    cutoff,
-                ),
-            )
 
-            return cur.rowcount == 1
+                await connection.commit()
 
-    async def complete_result(
-        self,
-        message_id: int,
-        owner_token: str,
-        result_message_id: int,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
+                self.connection = connection
 
-                SET
-                    status='COMPLETED',
-                    result_message_id=?,
-                    result_send_owner_token=NULL,
-                    result_send_started_at=NULL,
-                    next_retry_at=NULL,
-                    error_code=NULL,
-                    error_message=NULL
-
-                WHERE
-                    message_id=?
-                    AND status='PROCESSING_RESULT'
-                    AND result_send_owner_token=?
-                    AND result_winners IS NOT NULL
-                    AND final_participant_count IS NOT NULL
-                """,
-                (
-                    result_message_id,
-                    message_id,
-                    owner_token,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    async def result_failed(
-        self,
-        message_id: int,
-        owner_token: str,
-        retry_count: int,
-        next_retry_at: float | None,
-        error_code: str,
-        error_message: str,
-        permanent: bool,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET
-                    status=?,
-                    retry_count=?,
-                    next_retry_at=?,
-                    error_code=?,
-                    error_message=?,
-                    result_send_owner_token=NULL,
-                    result_send_started_at=NULL
-
-                WHERE
-                    message_id=?
-                    AND status='PROCESSING_RESULT'
-                    AND result_send_owner_token=?
-                """,
-                (
-                    "FAILED"
-                    if permanent
-                    else "PROCESSING_RESULT",
-                    retry_count,
-                    None if permanent else next_retry_at,
-                    error_code[:100],
-                    str(error_message)[:1000],
-                    message_id,
-                    owner_token,
-                ),
-            )
-
-            return cur.rowcount == 1
-
-    # ============================================================
-    # PARTICIPANTS
-    # ============================================================
-
-    async def add_participant(
-        self,
-        message_id: int,
-        user_id: int,
-    ) -> tuple[bool, str]:
-        async with self.transaction() as db:
-
-            async with db.execute(
-                """
-                SELECT
-                    status,
-                    max_participants
-
-                FROM giveaway_system
-
-                WHERE message_id=?
-                """,
-                (message_id,),
-            ) as cursor:
-                giveaway = await cursor.fetchone()
-
-            if giveaway is None:
-                return False, "NOT_FOUND"
-
-            if giveaway["status"] != ACTIVE:
-                return False, "CLOSED"
-
-            async with db.execute(
-                """
-                SELECT 1
-
-                FROM giveaway_participants
-
-                WHERE
-                    message_id=?
-                    AND user_id=?
-                """,
-                (
-                    message_id,
-                    user_id,
-                ),
-            ) as cursor:
-                existing = await cursor.fetchone()
-
-            if existing:
-                return False, "ALREADY_JOINED"
-
-            async with db.execute(
-                """
-                SELECT COUNT(*) AS count
-
-                FROM giveaway_participants
-
-                WHERE message_id=?
-                """,
-                (message_id,),
-            ) as cursor:
-                count = await cursor.fetchone()
-
-            if count["count"] >= giveaway["max_participants"]:
-                return False, "FULL"
-
-            await db.execute(
-                """
-                INSERT INTO giveaway_participants
-                (
-                    message_id,
-                    user_id,
-                    joined_at
-                )
-                VALUES (?, ?, ?)
-                """,
-                (
-                    message_id,
-                    user_id,
-                    now(),
-                ),
-            )
-
-            await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET participant_count=(
-                    SELECT COUNT(*)
-                    FROM giveaway_participants
-                    WHERE message_id=?
+                logger.info(
+                    "Database initialized successfully: %s",
+                    self.db_path,
                 )
 
-                WHERE message_id=?
-                """,
-                (
-                    message_id,
-                    message_id,
-                ),
-            )
-
-            return True, "JOINED"
-
-    async def get_participants(
-        self,
-        message_id: int,
-    ) -> list[int]:
-        db = self._db()
-
-        async with db.execute(
-            """
-            SELECT user_id
-
-            FROM giveaway_participants
-
-            WHERE message_id=?
-
-            ORDER BY joined_at ASC
-            """,
-            (message_id,),
-        ) as cursor:
-            rows = await cursor.fetchall()
-
-        return [
-            int(row["user_id"])
-            for row in rows
-        ]
-
-    async def reconcile_participant_count(
-        self,
-        message_id: int,
-    ):
-        async with self.transaction() as db:
-            await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET participant_count=(
-                    SELECT COUNT(*)
-                    FROM giveaway_participants
-                    WHERE message_id=?
+            except Exception:
+                logger.exception(
+                    "Database initialization failed."
                 )
 
-                WHERE message_id=?
-                """,
-                (
-                    message_id,
-                    message_id,
-                ),
+                if connection is not None:
+                    await connection.close()
+
+                raise
+
+    async def execute(
+        self,
+        query: str,
+        params=(),
+    ) -> int:
+        if self.connection is None:
+            raise RuntimeError(
+                "Database connection is not initialized."
             )
 
-    # ============================================================
-    # RECOVERY
-    # ============================================================
+        async with self.operation_lock:
+            async with self.connection.execute(
+                query,
+                params,
+            ) as cursor:
+                rowcount = cursor.rowcount
+                await self.connection.commit()
+                return rowcount
 
-    async def stale_processing(
+    async def fetchone(
         self,
-        cutoff: float,
+        query: str,
+        params=(),
     ):
-        db = self._db()
-
-        async with db.execute(
-            """
-            SELECT
-                message_id,
-                processing_token,
-                result_winners
-
-            FROM giveaway_system
-
-            WHERE
-                status='PROCESSING'
-                AND processing_started_at < ?
-            """,
-            (cutoff,),
-        ) as cursor:
-            return await cursor.fetchall()
-
-    async def recover_processing(
-        self,
-        message_id: int,
-        processing_token: str,
-        has_result: bool,
-    ) -> bool:
-        target = (
-            PROCESSING_RESULT
-            if has_result
-            else ACTIVE
-        )
-
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET
-                    status=?,
-                    processing_token=NULL,
-                    processing_started_at=NULL,
-                    next_retry_at=?
-
-                WHERE
-                    message_id=?
-                    AND status='PROCESSING'
-                    AND processing_token=?
-                """,
-                (
-                    target,
-                    now()
-                    if target == PROCESSING_RESULT
-                    else None,
-                    message_id,
-                    processing_token,
-                ),
+        if self.connection is None:
+            raise RuntimeError(
+                "Database connection is not initialized."
             )
 
-            return cur.rowcount == 1
+        async with self.operation_lock:
+            async with self.connection.execute(
+                query,
+                params,
+            ) as cursor:
+                return await cursor.fetchone()
 
-    async def stale_result_leases(
+    async def fetchall(
         self,
-        cutoff: float,
+        query: str,
+        params=(),
     ):
-        db = self._db()
-
-        async with db.execute(
-            """
-            SELECT
-                message_id,
-                result_send_owner_token
-
-            FROM giveaway_system
-
-            WHERE
-                status='PROCESSING_RESULT'
-                AND result_send_owner_token IS NOT NULL
-                AND result_send_started_at < ?
-            """,
-            (cutoff,),
-        ) as cursor:
-            return await cursor.fetchall()
-
-    async def recover_result_lease(
-        self,
-        message_id: int,
-        owner_token: str,
-    ) -> bool:
-        async with self.transaction() as db:
-            cur = await db.execute(
-                """
-                UPDATE giveaway_system
-
-                SET
-                    result_send_owner_token=NULL,
-                    result_send_started_at=NULL,
-                    next_retry_at=?
-
-                WHERE
-                    message_id=?
-                    AND status='PROCESSING_RESULT'
-                    AND result_send_owner_token=?
-                """,
-                (
-                    now(),
-                    message_id,
-                    owner_token,
-                ),
+        if self.connection is None:
+            raise RuntimeError(
+                "Database connection is not initialized."
             )
 
-            return cur.rowcount == 1
+        async with self.operation_lock:
+            async with self.connection.execute(
+                query,
+                params,
+            ) as cursor:
+                return await cursor.fetchall()
+
+    async def transaction(
+        self,
+        queries_with_params,
+    ) -> bool:
+        if self.connection is None:
+            raise RuntimeError(
+                "Database connection is not initialized."
+            )
+
+        async with self.operation_lock:
+            try:
+                await self.connection.execute(
+                    "BEGIN IMMEDIATE"
+                )
+
+                for query, params in queries_with_params:
+                    await self.connection.execute(
+                        query,
+                        params,
+                    )
+
+                await self.connection.commit()
+                return True
+
+            except Exception:
+                await self.connection.rollback()
+                raise
+
+    async def close(self):
+        if self.connection is None:
+            return
+
+        async with self.operation_lock:
+            try:
+                await self.connection.close()
+            finally:
+                self.connection = None
+
+        logger.info("Database connection closed.")
